@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.!
 
+// /*
+// spm_train-- input = sample.txt-- model_prefix = wm-- vocab_size = 32000 --character_coverage = 1.0 --model_type = unigram-- max_sentence_length = 4096 --train_extremely_large_corpus = true
+// */
+
 #ifndef TRAINER_INTERFACE_H_
 #define TRAINER_INTERFACE_H_
 
@@ -21,7 +25,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
 #include "common.h"
 #include "filesystem.h"
 #include "sentencepiece_model.pb.h"
@@ -29,155 +32,281 @@
 #include "sentencepiece_trainer.h"
 #include "third_party/absl/container/flat_hash_map.h"
 #include "util.h"
+#include "leveldb/db.h"
+#include "leveldb/write_batch.h"
+#include <sstream>
+#include <iostream>
+#include <stdexcept>
+#include <unicode/uscript.h> // Assuming you have this header for script handling
+#include "trainer_spec.h"   // Assuming you have this header for TrainerSpec
+#include "normalizer_spec.h"
 
-namespace sentencepiece {
+namespace sentencepiece
+{
 
-template <typename K, typename V>
-std::vector<std::pair<K, V>> Sorted(const std::vector<std::pair<K, V>> &m) {
-  std::vector<std::pair<K, V>> v = m;
-  std::sort(v.begin(), v.end(),
-            [](const std::pair<K, V> &p1, const std::pair<K, V> &p2) {
-              return (p1.second > p2.second ||
-                      (p1.second == p2.second && p1.first < p2.first));
-            });
-  return v;
-}
-
-template <typename K, typename V>
-std::vector<std::pair<K, V>> Sorted(const absl::flat_hash_map<K, V> &m) {
-  std::vector<std::pair<K, V>> v(m.begin(), m.end());
-  return Sorted(v);
-}
-
-class MultiFileSentenceIterator : public SentenceIterator {
- public:
-  explicit MultiFileSentenceIterator(const std::vector<std::string> &files);
-  ~MultiFileSentenceIterator() {}
-
-  bool done() const override;
-  void Next() override;
-  const std::string &value() const override { return value_; }
-  util::Status status() const override;
-
- private:
-  void TryRead();
-
-  bool read_done_ = false;
-  size_t file_index_ = 0;
-  std::vector<std::string> files_;
-  std::string value_;
-  std::unique_ptr<filesystem::ReadableFile> fp_;
-};
-
-// Base trainer class
-class TrainerInterface {
- public:
-  using Sentence = std::pair<std::string, int64>;
-  using Sentences = std::vector<Sentence>;
-
-  static const char32 kWSChar;
-  static const char32 kUNKChar;
-  static const char32 kUPPBoundaryChar;
-  static const char kWSStr[];
-  static const char kUNKStr[];
-  static const char kUPPBoundaryStr[];
-
-  TrainerInterface(const TrainerSpec &trainer_spec,
-                   const NormalizerSpec &normalizer_spec,
-                   const NormalizerSpec &denormalizer_spec);
-
-  virtual ~TrainerInterface();
-
-  // Loads sentence from `sentence_iterator` and stores the model
-  // to `output_model_proto`.
-  virtual util::Status Train(SentenceIterator *sentence_iterator,
-                             ModelProto *output_model_proto) {
-    sentence_iterator_ = sentence_iterator;
-    output_model_proto_ = output_model_proto;
-    return Train();
+  template <typename K, typename V>
+  std::vector<std::pair<K, V>> Sorted(const std::vector<std::pair<K V>> &m)
+  {
+    std::vector<std::pair<K, V>> v = m;
+    std::sort(v.begin(), v.end(),
+              [](const std::pair<K, V> &p1, const std::pair<K, V> &p2)
+              {
+                return (p1.second > p2.second ||
+                        (p1.second == p2.second && p1.first < p2.first));
+              });
+    return v;
   }
 
-  virtual util::Status Train() { return status(); }
+  template <typename K, typename V>
+  std::vector<std::pair<K, V>> Sorted(const absl::flat_hash_map<K, V> &m)
+  {
+    std::vector<std::pair<K, V>> v(m.begin(), m.end());
+    return Sorted(v);
+  }
 
-  virtual util::Status status() const { return status_; }
+  class MultiFileSentenceIterator : public SentenceIterator
+  {
+  public:
+    explicit MultiFileSentenceIterator(const std::vector<std::string> &files);
+    ~MultiFileSentenceIterator() {}
 
-  FRIEND_TEST(TrainerInterfaceTest, IsValidSentencePieceTest);
-  FRIEND_TEST(TrainerInterfaceTest, OverrideSpecialPiecesTest);
-  FRIEND_TEST(TrainerInterfaceTest, BytePiecesTest);
-  FRIEND_TEST(TrainerInterfaceTest, SerializeTest);
-  FRIEND_TEST(TrainerInterfaceTest, CharactersTest);
+    bool done() const override;
+    void Next() override;
+    const std::string &value() const override { return value_; }
+    util::Status status() const override;
 
-  // Loads all sentences from spec.input() or SentenceIterator.
-  // It loads at most input_sentence_size sentences.
-  util::Status LoadSentences();
+  private:
+    void TryRead();
 
- protected:
-  // Returns true if |piece| is valid sentence piece.
-  // The result is affected by
-  // max_sentencepiece_length, split_by_whiespace, split_by_unicode_script.
-  bool IsValidSentencePiece(const string_util::UnicodeText &piece) const;
+    bool read_done_ = false;
+    size_t file_index_ = 0;
+    std::vector<std::string> files_;
+    std::string value_;
+    std::unique_ptr<filesystem::ReadableFile> fp_;
+  };
 
-  // Splits all sentencecs by whitespaces and
-  // replace the |sentences_| with tokenized string.
-  // e.g.,
-  //  [ ["hello world ", 1], ["hi world]" ] =>
-  //  [ ["hello", 1], ["hi", 1], ["world", 2] ]
-  void SplitSentencesByWhitespace();
+  // Base trainer class
+  class TrainerInterface
+  {
+  public:
+    using Sentence = std::pair<std::string, int64_t>;
+    using Sentences = leveldb::DB *;
 
-  // Save model files into spec.model_prefix().
-  util::Status Save() const;
+    static const char32_t kWSChar;
+    static const char32_t kUNKChar;
+    static const char32_t kUPPBoundaryChar;
+    static const char kWSStr[];
+    static const char kUNKStr[];
+    static const char kUPPBoundaryStr[];
 
-  // Set of characters which must be included in the final vocab.
-  // The value of this map stores the frequency.
-  absl::flat_hash_map<char32, int64> required_chars_;
+    TrainerInterface(const TrainerSpec &trainer_spec,
+                     const NormalizerSpec &normalizer_spec,
+                     const NormalizerSpec &denormalizer_spec)
+        : trainer_spec_(trainer_spec),
+          normalizer_spec_(normalizer_spec),
+          denormalizer_spec_(denormalizer_spec)
+    {
+      status_ = VerifySpec(trainer_spec_);
+      if (status_.ok())
+        status_ = InitMetaPieces();
 
-  // Final output pieces
-  std::vector<std::pair<std::string, float>> final_pieces_;
+      leveldb::Options options;
+      options.create_if_missing = true;
+      leveldb::Status status = leveldb::DB::Open(options, "sentences_db", &sentences_db_);
+      if (!status.ok())
+      {
+        throw std::runtime_error("Failed to open LevelDB: " + status.ToString());
+      }
+    }
 
-  // All sentences.
-  Sentences sentences_;
+    virtual ~TrainerInterface()
+    {
+      delete sentences_db_;
+    }
 
-  // Trainer spec.
-  TrainerSpec trainer_spec_;
+    bool IsValidSentencePiece(const string_util::UnicodeText &sentencepiece) const
+    {
+      // Returns false if the length of piece is invalid.
+      if (sentencepiece.empty() ||
+          sentencepiece.size() > static_cast<size_t>(trainer_spec_.max_sentencepiece_length()))
+      {
+        return false;
+      }
 
-  // Normalizer spec
-  NormalizerSpec normalizer_spec_;
+      constexpr unicode_script::ScriptType kAnyType = static_cast<unicode_script::ScriptType>(-1);
+      unicode_script::ScriptType prev_script = kAnyType;
+      bool all_whitespace_piece = std::all_of(sentencepiece.begin(), sentencepiece.end(),
+                                              [](char32_t c)
+                                              { return c == kWSChar; });
 
-  // Denormalizer spec
-  NormalizerSpec denormalizer_spec_;
+      for (size_t pos = 0; pos < sentencepiece.size(); ++pos)
+      {
+        const char32_t c = sentencepiece[pos];
+        if (c == kUNKChar)
+        { // UNK must not be included
+          return false;
+        }
+        if (c == 0x0000)
+        { // NULL is not allowed for Darts (TRIE).
+          return false;
+        }
+        if (c == kUPPBoundaryChar)
+        {
+          return false;
+        }
+        if (c == 0x0020)
+        {
+          std::cerr << "space must not be included in normalized string." << std::endl;
+          return false;
+        }
+        if (!string_util::IsValidCodepoint(c))
+        {
+          return false;
+        }
 
-  // Reserved control pieces. e.g., <unk>, <s>, </s>.
-  // key is vocab id.
-  std::map<int, std::pair<std::string, ModelProto::SentencePiece::Type>>
-      meta_pieces_;
+        if (c == kWSChar)
+        {
+          // Only allows whitespace to appear as a prefix of piece unless
+          // allow_whitespace_only_pieces is True.
+          // When split_by_whitespace is false, we allow whitespaces to
+          // appear in the middle, "foo_bar", but do not allow them
+          // to appear as suffix, "foo_bar_".
+          // Regardless of the setting of split_by_whitespace,
+          // whitespace is treated as a prefix/infix of symbol or
+          // independent symbol, unless allow_whitespace_only_pieces() is true,
+          // in which case whitespace only pieces can occur.
+          if (!trainer_spec_.allow_whitespace_only_pieces() || !all_whitespace_piece)
+          {
+            if (trainer_spec_.treat_whitespace_as_suffix())
+            {
+              if ((trainer_spec_.split_by_whitespace() && pos < sentencepiece.size() - 1) ||
+                  (!trainer_spec_.split_by_whitespace() && pos < sentencepiece.size() - 1 && pos == 0))
+              {
+                return false;
+              }
+            }
+            else
+            {
+              if ((trainer_spec_.split_by_whitespace() && pos > 0) ||
+                  (!trainer_spec_.split_by_whitespace() && pos > 0 && pos == sentencepiece.size() - 1))
+              {
+                return false;
+              }
+            }
+          }
+        }
+        else
+        {
+          auto s = unicode_script::GetScript(c);
 
-  // Detect errors on initialization.
-  util::Status status_;
+          // Merge Hiragana/Katakana into Han.
+          if (s == unicode_script::U_Hiragana || s == unicode_script::U_Katakana || c == 0x30FC)
+          { // long vowel sound (Katakana) should be Katakana
+            s = unicode_script::U_Han;
+          }
+          else if (s == unicode_script::U_Inherited)
+          {
+            s = prev_script;
+          }
 
-  // Loads sentences from SentenceIterator if not null.
-  SentenceIterator *sentence_iterator_ = nullptr;
+          if (!trainer_spec_.split_by_number() && is_unicode_decimal_number(c))
+          {
+            s = kAnyType;
+          }
 
-  // Emits model to this proto instead of file.
-  ModelProto *output_model_proto_ = nullptr;
+          if (trainer_spec_.split_digits() && is_unicode_decimal_number(c))
+          {
+            if (sentencepiece.size() > 1)
+              return false;
+          }
 
- private:
-  // Serialize final_pieces_ to |model_proto|.
-  util::Status Serialize(ModelProto *model_proto) const;
+          // Do not allow a piece to include multiple Unicode scripts
+          // when split_by_unicode_script() is true (default = true).
+          if (trainer_spec_.split_by_unicode_script() && s != kAnyType &&
+              prev_script != kAnyType && prev_script != s)
+          {
+            return false;
+          }
 
-  // Saves the best sentence split with the current model for debugging.
-  util::Status SaveSplits(absl::string_view filename) const;
+          prev_script = s;
+        }
+      }
+      return true;
+    }
 
-  // Saves model file.
-  util::Status SaveModel(absl::string_view filename) const;
+    // Serializes a Sentence into a string
+    std::string serializeSentence(const Sentence &sentence) const
+    {
+      std::ostringstream oss;
+      size_t strSize = sentence.first.size();
+      oss.write(reinterpret_cast<const char *>(&strSize), sizeof(strSize));
+      oss.write(sentence.first.data(), strSize);
+      oss.write(reinterpret_cast<const char *>(&sentence.second), sizeof(sentence.second));
+      return oss.str();
+    }
 
-  // Saves vocabulary file for NMT.
-  util::Status SaveVocab(absl::string_view filename) const;
+    // Deserializes a string into a Sentence
+    Sentence deserializeSentence(const std::string &data) const
+    {
+      std::istringstream iss(data);
+      size_t strSize;
+      iss.read(reinterpret_cast<char *>(&strSize), sizeof(strSize));
+      std::string str(strSize, '\0');
+      iss.read(&str[0], strSize);
+      int64_t number;
+      iss.read(reinterpret_cast<char *>(&number), sizeof(number));
+      return {str, number};
+    }
 
-  // Initializes `meta_pieces_` from TrainerSpec.
-  util::Status InitMetaPieces();
+    // Add a sentence to the LevelDB
+    void addSentenceToDB(const Sentence &sentence, const std::string &key)
+    {
+      std::string serializedSentence = serializeSentence(sentence);
+      leveldb::Status status = sentences_db_->Put(leveldb::WriteOptions(), key, serializedSentence);
+      if (!status.ok())
+      {
+        throw std::runtime_error("Failed to write to LevelDB: " + status.ToString());
+      }
+    }
 
-  // Randomly sampled raw sentences for self-testing.
-  std::vector<std::string> self_test_samples_;
-};
-}  // namespace sentencepiece
-#endif  // TRAINER_INTERFACE_H_
+    // Retrieve a sentence from the LevelDB
+    Sentence getSentenceFromDB(const std::string &key)
+    {
+      std::string value;
+      leveldb::Status status = sentences_db_->Get(leveldb::ReadOptions(), key, &value);
+      if (!status.ok())
+      {
+        throw std::runtime_error("Failed to read from LevelDB: " + status.ToString());
+      }
+      return deserializeSentence(value);
+    }
+
+    // Update a sentence in the LevelDB
+    void updateSentenceInDB(const std::string &key, const Sentence &newSentence)
+    {
+      addSentenceToDB(newSentence, key); // Since LevelDB Put will overwrite existing entry
+    }
+
+    // Delete a sentence from the LevelDB
+    void deleteSentenceFromDB(const std::string &key)
+    {
+      leveldb::Status status = sentences_db_->Delete(leveldb::WriteOptions(), key);
+      if (!status.ok())
+      {
+        throw std::runtime_error("Failed to delete from LevelDB: " + status.ToString());
+      }
+    }
+
+  protected:
+    // Other existing methods...
+
+  private:
+    leveldb::DB *sentences_db_; // LevelDB database for storing sentences
+    TrainerSpec trainer_spec_;
+    NormalizerSpec normalizer_spec_;
+    NormalizerSpec denormalizer_spec_;
+    util::Status status_;
+  };
+
+} // namespace sentencepiece
+#endif // TRAINER_INTERFACE_H_
