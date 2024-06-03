@@ -359,3 +359,19 @@ if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
   set_xcode_property(spm_train PRODUCT_BUNDLE_IDENTIFIER "SentencePiece" All)
   set_xcode_property(spm_export_vocab PRODUCT_BUNDLE_IDENTIFIER "SentencePiece" All)
 endif()
+
+
+find_library(LEVELDB_LIBRARY leveldb)
+find_path(LEVELDB_INCLUDE_DIR leveldb/db.h)
+
+if(NOT LEVELDB_LIBRARY OR NOT LEVELDB_INCLUDE_DIR)
+  message(FATAL_ERROR "LevelDB library not found.")
+else()
+  include_directories(${LEVELDB_INCLUDE_DIR})
+
+# Add the executable
+  add_executable(trainer_interface trainer_interface.cc)
+
+# Link LevelDB
+  target_link_libraries(trainer_interface ${LEVELDB_LIBRARY})
+endif()

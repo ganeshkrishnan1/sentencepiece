@@ -193,3 +193,10 @@ set(CPACK_PACKAGE_CONTACT "taku@google.com")
 set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Taku Kudo")
 set(CPACK_SOURCE_IGNORE_FILES "/build/;/.git/;/dist/;/sdist/;~$;${CPACK_SOURCE_IGNORE_FILES}")
 include(CPack)
+
+cmake_minimum_required(VERSION 3.10)
+project(sentencepiece LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 11)
+
+find_package(LevelDB REQUIRED)
