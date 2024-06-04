@@ -150,6 +150,19 @@ namespace sentencepiece
       ++current_index_;
     }
 
+    // Get the Fi
+
+    // Remove a sentence from the database
+    void removeSentenceFromDB(size_t index)
+    {
+      std::string key = std::to_string(index);
+      leveldb::Status s = db_->Delete(leveldb::WriteOptions(), key);
+      if (!s.ok())
+      {
+        throw std::runtime_error("Failed to delete from LevelDB: " + s.ToString());
+      }
+    }
+
     // Load all sentences from the database
     void loadSentencesFromDB()
     {
@@ -207,6 +220,23 @@ namespace sentencepiece
       {
         throw std::runtime_error("Failed to update LevelDB: " + s.ToString());
       }
+    }
+
+    size_t getDBSize() const
+    {
+      size_t count = 0;
+      std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+      for (it->SeekToFirst(); it->Valid(); it->Next())
+      {
+        ++count;
+      }
+
+      if (!it->status().ok())
+      {
+        throw std::runtime_error("Failed to iterate LevelDB: " + it->status().ToString());
+      }
+
+      return count;
     }
 
   protected:

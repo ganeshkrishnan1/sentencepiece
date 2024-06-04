@@ -1,1 +1,0 @@
-/usr/bin/clang++ -O3 -Wall -fPIC  -g -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX14.2.sdk -mmacosx-version-min=14.0 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/trainer_interface.dir/trainer_interface.cc.o -o trainer_interface  /opt/homebrew/lib/libleveldb.dylib

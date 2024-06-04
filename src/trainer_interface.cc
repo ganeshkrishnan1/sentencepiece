@@ -111,9 +111,10 @@ namespace sentencepiece
 
       static constexpr int64 kTooBigSentencesSize = 1000000;
 
-      SentenceSelector(TrainerInterface::Sentences *sentences,
+      SentenceSelector(std::function<void(const TrainerInterface::Sentence &)> addSentenceToDB,
+                       std::function<size_t()> getDBSize,
                        const TrainerSpec &spec)
-          : sentences_(sentences), spec_(&spec)
+          : addSentenceToDB_(addSentenceToDB), getDBSize_(getDBSize), spec_(&spec)
       {
         if (spec_->input_sentence_size() > 0)
         {
@@ -121,7 +122,7 @@ namespace sentencepiece
           {
             constexpr size_t kSeed = 12345678;
             sampler_ = std::make_unique<Sampler>(
-                sentences, spec_->input_sentence_size(), kSeed);
+                nullptr, spec_->input_sentence_size(), kSeed);
           }
           else
           {
@@ -134,9 +135,10 @@ namespace sentencepiece
 
       void Finish() const
       {
-        if (sentences_->size() > kTooBigSentencesSize)
+        size_t db_size = getDBSize_();
+        if (db_size > kTooBigSentencesSize)
         {
-          LOG(WARNING) << "Too many sentences are loaded! (" << sentences_->size()
+          LOG(WARNING) << "Too many sentences are loaded! (" << db_size
                        << "), which may slow down training.";
           LOG(WARNING) << "Consider using "
                           "--input_sentence_size=<size> and "
@@ -150,7 +152,7 @@ namespace sentencepiece
       {
         if (spec_->input_sentence_size() == 0)
         {
-          sentences_->emplace_back(sentence);
+          addSentenceToDB_(sentence);
         }
         else
         {
@@ -160,8 +162,8 @@ namespace sentencepiece
           }
           else
           {
-            sentences_->emplace_back(sentence);
-            if (sentences_->size() >= spec_->input_sentence_size())
+            addSentenceToDB_(sentence);
+            if (getDBSize_() >= spec_->input_sentence_size())
               return false;
           }
         }
@@ -176,12 +178,13 @@ namespace sentencepiece
 
       size_t total_size() const
       {
-        return sampler_.get() ? sampler_->total_size() : sentences_->size();
+        return getDBSize_();
       }
 
     private:
-      TrainerInterface::Sentences *sentences_ = nullptr;
-      const TrainerSpec *spec_ = nullptr;
+      std::function<void(const TrainerInterface::Sentence &)> addSentenceToDB_;
+      std::function<size_t()> getDBSize_;
+      const TrainerSpec *spec_;
       std::unique_ptr<Sampler> sampler_;
     };
   } // namespace
@@ -385,7 +388,7 @@ namespace sentencepiece
   util::Status TrainerInterface::LoadSentences()
   {
     RETURN_IF_ERROR(status());
-    CHECK_OR_RETURN(sentences_.empty());
+    // CHECK_OR_RETURN(sentences_.empty());
     CHECK_OR_RETURN(required_chars_.empty());
     CHECK_OR_RETURN(trainer_spec_.input_format().empty() ||
                     trainer_spec_.input_format() == "text" ||
@@ -405,7 +408,11 @@ namespace sentencepiece
 
     const bool is_tsv = trainer_spec_.input_format() == "tsv";
 
-    SentenceSelector selector(&sentences_, trainer_spec_);
+    SentenceSelector selector(
+        std::bind(&TrainerInterface::addSentenceToDB, this, std::placeholders::_1),
+        std::bind(&TrainerInterface::getDBSize, this),
+        trainer_spec_);
+
     random::ReservoirSampler<std::string> test_sentence_sampler(
         &self_test_samples_, trainer_spec_.self_test_sample_size());
 
@@ -476,13 +483,13 @@ namespace sentencepiece
     // Emits error message if any.
     selector.Finish();
 
-    if (sentences_.size() == selector.total_size())
+    if (getDBSize() == selector.total_size())
     {
-      LOG(INFO) << "Loaded all " << sentences_.size() << " sentences";
+      LOG(INFO) << "Loaded all " << getDBSize() << " sentences";
     }
     else
     {
-      LOG(INFO) << "Sampled " << sentences_.size() << " sentences from "
+      LOG(INFO) << "Sampled " << getDBSize() << " sentences from "
                 << selector.total_size() << " sentences.";
     }
 
@@ -503,7 +510,7 @@ namespace sentencepiece
       const normalizer::PrefixMatcher meta_pieces_matcher(meta_pieces_set);
 
       LOG(INFO) << "Normalizing sentences...";
-      CHECK_OR_RETURN(!sentences_.empty());
+      CHECK_OR_RETURN(getDBSize() > 0);
       {
         auto pool = std::make_unique<ThreadPool>(trainer_spec_.num_threads());
         pool->StartWorkers();
@@ -511,24 +518,27 @@ namespace sentencepiece
         {
           pool->Schedule([&, n]()
                          {
-          for (size_t i = n; i < sentences_.size();
+          for (size_t i = n; i < getDBSize();
                i += trainer_spec_.num_threads()) {
-            auto *s = &sentences_[i].first;
-            *s = meta_pieces_matcher.GlobalReplace(normalizer.Normalize(*s),
-                                                   kUPPBoundaryStr);
+            auto *s = getSentenceFromDB(i).first;
+            *s = meta_pieces_matcher.GlobalReplace(normalizer.Normalize(*s),kUPPBoundaryStr);
           } });
         }
       }
 
-      for (size_t i = 0; i < sentences_.size(); ++i)
+      for (size_t i = 0; i < getDBSize(); ++i)
       {
-        auto *s = &sentences_[i].first;
+        auto *s = getSentenceFromDB(i).first;
         CHECK_OR_RETURN(s->find(" ") == std::string::npos)
             << "Normalized string must not include spaces";
         if (s->empty())
         {
-          std::swap(sentences_[i], sentences_[sentences_.size() - 1]);
-          sentences_.resize(sentences_.size() - 1);
+          // std::swap(getSentenceFromDB(i), getSentenceFromDB(getDBSize() - 1));
+          updateSentenceInDB(i, getSentenceFromDB(getDBSize() - 1));
+          updateSentenceInDB(getDBSize() - 1, getSentenceFromDB(i));
+
+          // sentences_.resize(sentences_.size() - 1);
+          removeSentenceFromDB(getDBSize() - 1);
         }
       }
     }
@@ -556,7 +566,7 @@ namespace sentencepiece
 
       // This line is mainly for tests with small num of sentences.
       const auto num_workers =
-          std::min<uint64>(trainer_spec_.num_threads(), sentences_.size() - 1);
+          std::min<uint64>(trainer_spec_.num_threads(), getDBSize() - 1);
 
       {
         auto pool = std::make_unique<ThreadPool>(num_workers);
@@ -567,15 +577,17 @@ namespace sentencepiece
                          {
           // One per thread generator.
           auto *generator = random::GetRandomGenerator();
-          for (size_t i = n; i < sentences_.size(); i += num_workers) {
-            AddDPNoise<int64>(trainer_spec_, generator,
-                              &(sentences_[i].second));
+          for (size_t i = n; i < getDBSize(); i += num_workers)
+          {
+            auto *s = getSentenceFromDB(i).first;
+            AddDPNoise<int64>(trainer_spec_, generator, s);
           } });
         }
       }
 
       // Remove zero freq elements.
-      const auto before_size = sentences_.size();
+      const auto before_size = getDBSize();
+
       auto it = std::remove_if(sentences_.begin(), sentences_.end(),
                                [](const Sentence &s)
                                { return s.second <= 0; });
@@ -689,7 +701,7 @@ namespace sentencepiece
           << "--character_coverage option.";
     }
 
-    LOG(INFO) << "Done! preprocessed " << sentences_.size() << " sentences.";
+    LOG(INFO) << "Done! preprocessed " << getDBSize() << " sentences.";
 
     return util::OkStatus();
   }
@@ -697,7 +709,7 @@ namespace sentencepiece
   void TrainerInterface::SplitSentencesByWhitespace()
   {
     LOG(INFO) << "Tokenizing input sentences with whitespace: "
-              << sentences_.size();
+              << getDBSize();
     absl::flat_hash_map<std::string, int64> tokens;
     for (const auto &s : sentences_)
     {
