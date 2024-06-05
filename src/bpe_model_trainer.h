@@ -24,7 +24,6 @@
 #include "third_party/absl/container/btree_set.h"
 #include "third_party/absl/container/flat_hash_map.h"
 #include "trainer_interface.h"
-#include "descriptor.h"
 
 namespace sentencepiece
 {

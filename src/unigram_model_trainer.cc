@@ -170,14 +170,51 @@ namespace sentencepiece
       // Pretokenizer is used as a constraint of piece extractions.
       const auto *pretokenizer = SentencePieceTrainer::GetPretokenizerForTraining();
 
-      auto pretokenize_or_rewrite = [&](std::pair<std::string, int64> *w)
+      // auto pretokenize_or_rewrite = [&](std::pair<std::string, int64> *w)
+      // {
+      //   if (pretokenizer)
+      //   {
+      //     std::vector<char32> chars;
+      //     for (const auto &w : pretokenizer->PreTokenize(w->first))
+      //     {
+      //       for (const auto &c : string_util::UTF8ToUnicodeText(w))
+      //       {
+      //         chars.push_back(c);
+      //       }
+      //       chars.push_back(kSentenceBoundary);
+      //     }
+      //     return chars;
+      //   }
+      //   else if (!trainer_spec_.pretokenization_delimiter().empty())
+      //   {
+      //     // When delimiter is specified, tokenize the input with the delimiter.
+      //     // For EM training, we assume that the delimiter doesn't exist and
+      //     // rewrite the original sentence.
+      //     std::vector<char32> chars;
+      //     absl::string_view delimiter = trainer_spec_.pretokenization_delimiter();
+      //     for (const auto &w : absl::StrSplit(w->first, delimiter))
+      //     {
+      //       for (const auto &c : string_util::UTF8ToUnicodeText(w))
+      //       {
+      //         chars.push_back(c);
+      //       }
+      //       chars.push_back(kSentenceBoundary);
+      //     }
+      //     // Removes the delimiter.
+      //     w->first = absl::StrReplaceAll(w->first, {{delimiter, ""}});
+      //     return chars;
+      //   }
+      //   return string_util::UTF8ToUnicodeText(w->first);
+      // };
+
+      auto pretokenize_or_rewrite = [&](std::string &w_first)
       {
         if (pretokenizer)
         {
           std::vector<char32> chars;
-          for (const auto &w : pretokenizer->PreTokenize(w->first))
+          for (const auto &token : pretokenizer->PreTokenize(w_first))
           {
-            for (const auto &c : string_util::UTF8ToUnicodeText(w))
+            for (const auto &c : string_util::UTF8ToUnicodeText(token))
             {
               chars.push_back(c);
             }
@@ -192,19 +229,19 @@ namespace sentencepiece
           // rewrite the original sentence.
           std::vector<char32> chars;
           absl::string_view delimiter = trainer_spec_.pretokenization_delimiter();
-          for (const auto &w : absl::StrSplit(w->first, delimiter))
+          for (const auto &token : absl::StrSplit(w_first, delimiter))
           {
-            for (const auto &c : string_util::UTF8ToUnicodeText(w))
+            for (const auto &c : string_util::UTF8ToUnicodeText(token))
             {
               chars.push_back(c);
             }
             chars.push_back(kSentenceBoundary);
           }
           // Removes the delimiter.
-          w->first = absl::StrReplaceAll(w->first, {{delimiter, ""}});
+          w_first = absl::StrReplaceAll(w_first, {{delimiter, ""}});
           return chars;
         }
-        return string_util::UTF8ToUnicodeText(w->first);
+        return string_util::UTF8ToUnicodeText(w_first);
       };
 
       // Merges all sentences into one array with 0x0000 delimiter.
@@ -215,7 +252,7 @@ namespace sentencepiece
 
       // for (auto &w : sentences_)
       // {
-      // const auto ut = pretokenize_or_rewrite(&w);
+      //   const auto ut = pretokenize_or_rewrite(&w);
       //   for (const auto &c : ut)
       //   {
       //     array.push_back(c);
@@ -238,30 +275,39 @@ namespace sentencepiece
       //   }
       // }
 
-      std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
-      for (it->SeekToFirst(); it->Valid(); it->Next())
+      for (size_t i = 0; i < getDBSize(); ++i)
       {
-        std::string value = it->value().ToString();
-        size_t pos = value.find('\0');
-        if (pos == std::string::npos)
-        {
-          throw std::runtime_error("Corrupted value in LevelDB");
-        }
-        std::string sentence = value.substr(0, pos);
-        int64 freq = 1;
-        CHECK(absl::SimpleAtoi(value.substr(pos + 1), &freq))
-            << "Could not parse the frequency; value: " << value;
-        const auto ut = pretokenize_or_rewrite(&sentence);
+        auto sentence_pair = getSentenceFromDB(i);
+        auto w_first = sentence_pair.first;
+        auto w_second = sentence_pair.second;
+        auto ut = pretokenize_or_rewrite(w_first);
+
         for (const auto &c : ut)
         {
-          all_chars[string_util::UnicodeCharToUTF8(c)] += freq;
+          array.push_back(c);
+          if (c != kUNKChar && c != kSentenceBoundary)
+          {
+            all_chars[string_util::UnicodeCharToUTF8(c)] += w_second;
+          }
         }
-        array.insert(array.end(), ut.begin(), ut.end());
-        array.push_back(kSentenceBoundary);
-      }
-      if (!it->status().ok())
-      {
-        throw std::runtime_error("Failed to iterate LevelDB: " + it->status().ToString());
+        array.push_back(kSentenceBoundary); // sentence boundary marker.
+
+        // Naive workaround to over-sample the input.
+        // In TSV mode, the frequency field is not used to extract the seed piece.
+        // We can at least extract all pieces by copying the input because
+        // the occurrence gets at least larger than or equals to 2.
+        if (is_tsv)
+        {
+          for (const auto &c : ut)
+            array.push_back(c);
+          array.push_back(kSentenceBoundary);
+        }
+
+        // Update the sentence in the database if modified
+        if (sentence_pair.first != w_first)
+        {
+          updateSentenceInDB(i, {w_first, w_second});
+        }
       }
 
       // all_chars must be included in the seed sentencepieces.
