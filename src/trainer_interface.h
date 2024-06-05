@@ -188,7 +188,7 @@ namespace sentencepiece
     }
 
     // Retrieve a specific sentence from the database based on some criteria (e.g., index)
-    Sentence getSentenceFromDB(size_t index)
+    Sentence getSentenceFromDB(size_t index) const
     {
       std::string key = std::to_string(index);
       std::string value;

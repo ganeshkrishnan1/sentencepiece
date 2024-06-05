@@ -368,10 +368,28 @@ namespace sentencepiece
       auto pool = std::make_unique<ThreadPool>(trainer_spec_.num_threads());
       pool->StartWorkers();
 
+      // int64 all_sentence_freq = 0;
+      // for (const auto &w : sentences_)
+      // {
+      //   all_sentence_freq += w.second;
+      // }
+
       int64 all_sentence_freq = 0;
-      for (const auto &w : sentences_)
+      std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+      for (it->SeekToFirst(); it->Valid(); it->Next())
       {
-        all_sentence_freq += w.second;
+        std::string value = it->value().ToString();
+        size_t pos = value.find('\0');
+        if (pos == std::string::npos)
+        {
+          throw std::runtime_error("Corrupted value in LevelDB");
+        }
+        int64_t count = std::stoll(value.substr(pos + 1));
+        all_sentence_freq += count;
+      }
+      if (!it->status().ok())
+      {
+        throw std::runtime_error("Failed to iterate LevelDB: " + it->status().ToString());
       }
 
       // Executes E step in parallel
@@ -383,8 +401,11 @@ namespace sentencepiece
       expected[n].resize(model.GetPieceSize(), 0.0);
       for (size_t i = n; i < getDBSize();
            i += trainer_spec_.num_threads()) {
-        const std::string &w = sentences_[i].first;
-        const int64 freq = sentences_[i].second;
+
+        auto sentence_pair = this->getSentenceFromDB(i);
+
+        const std::string &w = sentence_pair.first;
+        const int64 freq = sentence_pair.second;
         lattice.SetSentence(w);
         model.PopulateNodes(&lattice);
         const float Z = lattice.PopulateMarginal(freq, &expected[n]);
@@ -515,7 +536,7 @@ namespace sentencepiece
         Lattice lattice;
         for (size_t i = n; i < getDBSize();
              i += trainer_spec_.num_threads()) {
-          const auto &w = sentences_[i];
+          const auto &w = this->getSentenceFromDB(i);
           lattice.SetSentence(w.first);
           model.PopulateNodes(&lattice);
           vsums[n] += w.second;
@@ -568,7 +589,8 @@ namespace sentencepiece
           float F = 0.0; // the frequency of sentencepieces[i].
           for (const int n : inverted[i])
           {
-            F += sentences_[n].second;
+            auto s = this->getSentenceFromDB(n);
+            F += s.second;
           }
           F /= vsum; // normalizes by all sentence frequency.
 

@@ -24,107 +24,126 @@
 #include "third_party/absl/container/btree_set.h"
 #include "third_party/absl/container/flat_hash_map.h"
 #include "trainer_interface.h"
+#include <descriptor.h>
 
-namespace sentencepiece {
-namespace bpe {
+namespace sentencepiece
+{
+  namespace bpe
+  {
+    // struct Symbol
+    // {
+    //   int freq = 0;
+    //   int left;
+    //   int right;
+    //   std::vector<int> positions;
+    // };
+    // Trainer class for BPE model.
+    class Trainer : public TrainerInterface
+    {
+    public:
+      Trainer(const TrainerSpec &trainer_spec,
+              const NormalizerSpec &normalizer_spec,
+              const NormalizerSpec &denormalizer_spec)
+          : TrainerInterface::TrainerInterface(trainer_spec, normalizer_spec,
+                                               denormalizer_spec) {}
 
-// Trainer class for BPE model.
-class Trainer : public TrainerInterface {
- public:
-  Trainer(const TrainerSpec &trainer_spec,
-          const NormalizerSpec &normalizer_spec,
-          const NormalizerSpec &denormalizer_spec)
-      : TrainerInterface::TrainerInterface(trainer_spec, normalizer_spec,
-                                           denormalizer_spec) {}
+      util::Status Train() override;
 
-  util::Status Train() override;
+      // Symbol getSymbolFromDB(size_t sid, size_t index);
+      // Symbol DeserializeSymbol(const std::string &value) const;
 
- private:
-  // Symbol represents a character or symbol bigram.
-  struct Symbol {
-    const Symbol *left;              // left symbol in bigram
-    const Symbol *right;             // right symbol in bigram
-    string_util::UnicodeText chars;  // all flattend chracter sequence
-    bool is_unk;                     // true if this symbol is unknown.
-    uint64_t fp;                     // fingerprint of this symbol.
-    uint64_t freq;                   // frequency of this symbol.
+      // Symbol getSymbolFromDB(size_t sid, size_t index) const;
 
-    // Position list. Use set so that we can keep the order of occurrence.
-    // See EncodePos/DecodePos.
-    absl::btree_set<uint64_t> positions;
+    private:
+      // Symbol represents a character or symbol bigram.
+      struct Symbol
+      {
+        const Symbol *left;             // left symbol in bigram
+        const Symbol *right;            // right symbol in bigram
+        string_util::UnicodeText chars; // all flattend chracter sequence
+        bool is_unk;                    // true if this symbol is unknown.
+        uint64_t fp;                    // fingerprint of this symbol.
+        uint64_t freq;                  // frequency of this symbol.
 
-    bool IsBigram() const { return left != nullptr && right != nullptr; }
-    std::string ToString() const;
-    Symbol() : left(nullptr), right(nullptr), is_unk(false), fp(0), freq(0) {}
-  };
+        // Position list. Use set so that we can keep the order of occurrence.
+        // See EncodePos/DecodePos.
+        absl::btree_set<uint64_t> positions;
 
-  struct Position {
-    int sid;    // sentence id
-    int left;   // left symbol index
-    int right;  // right symbol index
-  };
+        bool IsBigram() const { return left != nullptr && right != nullptr; }
+        std::string ToString() const;
+        Symbol() : left(nullptr), right(nullptr), is_unk(false), fp(0), freq(0) {}
+      };
 
-  // Encodes sid, left and right bigram index into uint64_t.
-  // Encoded value keeps the order of sid, left and right.
-  static uint64_t EncodePos(int sid, int l, int r) {
-    CHECK_GE(l, 0);
-    CHECK_GE(r, 0);
-    CHECK_LE(l, std::numeric_limits<uint16_t>::max());
-    CHECK_LE(r, std::numeric_limits<uint16_t>::max());
-    const uint64_t n = (static_cast<uint64_t>(sid) << 32) |
-                       (static_cast<uint64_t>(l) << 16) | r;
-    return n;
-  }
+      struct Position
+      {
+        int sid;   // sentence id
+        int left;  // left symbol index
+        int right; // right symbol index
+      };
 
-  // Decodes sid, left and right bigram index from uint64_t.
-  static Position DecodePos(uint64_t n) {
-    Position p;
-    p.sid = n >> 32;
-    p.left = (n >> 16) & 0xffff;
-    p.right = n & 0xffff;
-    return p;
-  }
+      // Encodes sid, left and right bigram index into uint64_t.
+      // Encoded value keeps the order of sid, left and right.
+      static uint64_t EncodePos(int sid, int l, int r)
+      {
+        CHECK_GE(l, 0);
+        CHECK_GE(r, 0);
+        CHECK_LE(l, std::numeric_limits<uint16_t>::max());
+        CHECK_LE(r, std::numeric_limits<uint16_t>::max());
+        const uint64_t n = (static_cast<uint64_t>(sid) << 32) |
+                           (static_cast<uint64_t>(l) << 16) | r;
+        return n;
+      }
 
-  // Gets unary (character) symbol from the char code |c|.
-  // The return value is cached.
-  Symbol *GetCharSymbol(char32 c);
+      // Decodes sid, left and right bigram index from uint64_t.
+      static Position DecodePos(uint64_t n)
+      {
+        Position p;
+        p.sid = n >> 32;
+        p.left = (n >> 16) & 0xffff;
+        p.right = n & 0xffff;
+        return p;
+      }
 
-  // Gets symbol pair from left/right symbols. The return value is cached.
-  Symbol *GetPairSymbol(const Symbol *left, const Symbol *right);
+      // Gets unary (character) symbol from the char code |c|.
+      // The return value is cached.
+      Symbol *GetCharSymbol(char32 c);
 
-  // Computes the frequency of |symbol| and update symbol->freq field.
-  void ComputeFreq(Symbol *symbol) const;
+      // Gets symbol pair from left/right symbols. The return value is cached.
+      Symbol *GetPairSymbol(const Symbol *left, const Symbol *right);
 
-  // Returns the valid index before symbols_[sid][index].
-  int GetNextIndex(int sid, int index) const;
+      // Computes the frequency of |symbol| and update symbol->freq field.
+      void ComputeFreq(Symbol *symbol) const;
 
-  // Returns the valid index after symbols_[sid][index].
-  int GetPrevIndex(int sid, int index) const;
+      // Returns the valid index before symbols_[sid][index].
+      int GetNextIndex(int sid, int index) const;
 
-  // Makes a new bigram from [symbols_[sid][left], symbols_[sid][right]] and
-  // Adds it to symbols_cache_ and active_symbols_.
-  void AddNewPair(int sid, int left, int right);
+      // Returns the valid index after symbols_[sid][index].
+      int GetPrevIndex(int sid, int index) const;
 
-  // Resets the fequency of bigram [symbols_[sid][left] symbols_[sid][right]],
-  // if this bigram is not |best|.
-  void ResetFreq(int sid, int left, int right, const Symbol *best);
+      // Makes a new bigram from [symbols_[sid][left], symbols_[sid][right]] and
+      // Adds it to symbols_cache_ and active_symbols_.
+      void AddNewPair(int sid, int left, int right);
 
-  // Updates |active_symbols_| by copying the top 5% frequent symbols in
-  // symbols_cache_.
-  void UpdateActiveSymbols();
+      // Resets the fequency of bigram [symbols_[sid][left] symbols_[sid][right]],
+      // if this bigram is not |best|.
+      void ResetFreq(int sid, int left, int right, const Symbol *best);
 
-  // All unique symbols. Key is a fingerprint of Symbol.
-  absl::flat_hash_map<uint64_t, Symbol *> symbols_cache_;
+      // Updates |active_symbols_| by copying the top 5% frequent symbols in
+      // symbols_cache_.
+      void UpdateActiveSymbols();
 
-  // Set of symbols from which we find the best symbol in each iteration.
-  absl::btree_set<Symbol *> active_symbols_;
+      // All unique symbols. Key is a fingerprint of Symbol.
+      absl::flat_hash_map<uint64_t, Symbol *> symbols_cache_;
 
-  // Stores symbols allocated in heap so that we can delete them at onece.
-  std::vector<Symbol *> allocated_;
+      // Set of symbols from which we find the best symbol in each iteration.
+      absl::btree_set<Symbol *> active_symbols_;
 
-  // Sentences. symbols_[sid][index] stores a symbol in sentence_[sid][index].
-  std::vector<std::vector<Symbol *>> symbols_;
-};
-}  // namespace bpe
-}  // namespace sentencepiece
-#endif  // BPE_MODEL_TRAINER_H_
+      // Stores symbols allocated in heap so that we can delete them at onece.
+      std::vector<Symbol *> allocated_;
+
+      // Sentences. symbols_[sid][index] stores a symbol in sentence_[sid][index].
+      std::vector<std::vector<Symbol *>> symbols_;
+    };
+  } // namespace bpe
+} // namespace sentencepiece
+#endif // BPE_MODEL_TRAINER_H_

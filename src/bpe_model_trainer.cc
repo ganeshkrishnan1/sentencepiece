@@ -244,7 +244,8 @@ namespace sentencepiece
       size_t db_size = getDBSize();
       for (size_t i = 0; i < db_size; ++i)
       {
-        for (const char32 c : string_util::UTF8ToUnicodeText(sentences_[i].first))
+        TrainerInterface::Sentence sentence = getSentenceFromDB(i);
+        for (const char32 c : string_util::UTF8ToUnicodeText(sentence.first))
         {
           symbols_[i].push_back(GetCharSymbol(c));
         }
