@@ -21,52 +21,95 @@
 #include "word_model.h"
 #include "word_model_trainer.h"
 
-namespace sentencepiece {
-namespace word {
+namespace sentencepiece
+{
+  namespace word
+  {
 
-util::Status Trainer::Train() {
-  RETURN_IF_ERROR(status());
+    util::Status Trainer::Train()
+    {
+      RETURN_IF_ERROR(status());
 
-  CHECK_OR_RETURN(normalizer_spec_.escape_whitespaces());
-  CHECK_EQ_OR_RETURN(TrainerSpec::WORD, trainer_spec_.model_type());
+      CHECK_OR_RETURN(normalizer_spec_.escape_whitespaces());
+      CHECK_EQ_OR_RETURN(TrainerSpec::WORD, trainer_spec_.model_type());
 
-  RETURN_IF_ERROR(LoadSentences());
+      RETURN_IF_ERROR(LoadSentences());
 
-  absl::flat_hash_map<std::string, uint64> freq;
-  for (const auto &it : sentences_) {
-    for (const auto &s : SplitIntoWords(it.first)) {
-      freq[std::string(s)] += it.second;
+      // absl::flat_hash_map<std::string, uint64> freq;
+      // for (const auto &it : sentences_) {
+      //   for (const auto &s : SplitIntoWords(it.first)) {
+      //     freq[std::string(s)] += it.second;
+      //   }
+      // }
+
+      absl::flat_hash_map<std::string, int64_t> freq;
+      std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+      for (it->SeekToFirst(); it->Valid(); it->Next())
+      {
+        // Extract the sentence and its frequency from the database entry
+        std::string key = it->key().ToString();
+        std::string value = it->value().ToString();
+
+        // Assume that the value format is "sentence\0frequency"
+        size_t pos = value.find('\0');
+        if (pos == std::string::npos)
+        {
+          throw std::runtime_error("Corrupted value in LevelDB");
+        }
+        std::string sentence = value.substr(0, pos);
+        int64_t count = std::stoll(value.substr(pos + 1));
+
+        // Split the sentence into words and update the frequency map
+        for (const auto &word : SplitIntoWords(sentence))
+        {
+          freq[std::string(word)] += count;
+        }
+      }
+
+      if (!it->status().ok())
+      {
+        throw std::runtime_error("Failed to iterate LevelDB: " + it->status().ToString());
+      }
+
+      // Output the computed frequencies for debugging purposes
+      for (const auto &entry : freq)
+      {
+        std::cout << "Word: " << entry.first << ", Frequency: " << entry.second << std::endl;
+      }
+
+      const int vocab_size = trainer_spec_.vocab_size() - meta_pieces_.size();
+      CHECK_GE_OR_RETURN(vocab_size, 0);
+
+      uint64 sum = 0;
+      for (const auto &it : freq)
+      {
+        sum += it.second;
+      }
+
+      const auto logsum = std::log(static_cast<float>(sum));
+
+      CHECK_OR_RETURN(final_pieces_.empty());
+      for (const auto &it : Sorted(freq))
+      {
+        if (it.first.find(kUNKStr) != std::string::npos)
+        {
+          continue;
+        }
+        if (!trainer_spec_.use_all_vocab() &&
+            final_pieces_.size() == static_cast<size_t>(vocab_size))
+        {
+          break;
+        }
+        final_pieces_.emplace_back(
+            it.first, std::log(static_cast<float>(it.second)) - logsum);
+      }
+
+      if (trainer_spec_.use_all_vocab())
+      {
+        trainer_spec_.set_vocab_size(final_pieces_.size() + meta_pieces_.size());
+      }
+
+      return Save();
     }
-  }
-
-  const int vocab_size = trainer_spec_.vocab_size() - meta_pieces_.size();
-  CHECK_GE_OR_RETURN(vocab_size, 0);
-
-  uint64 sum = 0;
-  for (const auto &it : freq) {
-    sum += it.second;
-  }
-
-  const auto logsum = std::log(static_cast<float>(sum));
-
-  CHECK_OR_RETURN(final_pieces_.empty());
-  for (const auto &it : Sorted(freq)) {
-    if (it.first.find(kUNKStr) != std::string::npos) {
-      continue;
-    }
-    if (!trainer_spec_.use_all_vocab() &&
-        final_pieces_.size() == static_cast<size_t>(vocab_size)) {
-      break;
-    }
-    final_pieces_.emplace_back(
-        it.first, std::log(static_cast<float>(it.second)) - logsum);
-  }
-
-  if (trainer_spec_.use_all_vocab()) {
-    trainer_spec_.set_vocab_size(final_pieces_.size() + meta_pieces_.size());
-  }
-
-  return Save();
-}
-}  // namespace word
-}  // namespace sentencepiece
+  } // namespace word
+} // namespace sentencepiece

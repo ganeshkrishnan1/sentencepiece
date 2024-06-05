@@ -283,6 +283,7 @@ namespace sentencepiece
 
     // Emits model to this proto instead of file.
     ModelProto *output_model_proto_ = nullptr;
+    leveldb::DB *db_;
 
   private:
     // Serialize final_pieces_ to |model_proto|.
@@ -304,7 +305,6 @@ namespace sentencepiece
     std::vector<std::string> self_test_samples_;
 
     // LevelDB database instance
-    leveldb::DB *db_;
     size_t current_index_ = 0; // to keep track of the last index used in LevelDB
   };
 } // namespace sentencepiece

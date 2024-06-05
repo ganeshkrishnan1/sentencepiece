@@ -245,7 +245,7 @@ namespace sentencepiece
   //     status_ = InitMetaPieces();
   // }
 
-  TrainerInterface::~TrainerInterface() {}
+  // TrainerInterface::~TrainerInterface() {}
 
   bool TrainerInterface::IsValidSentencePiece(
       const string_util::UnicodeText &sentencepiece) const
@@ -690,7 +690,7 @@ namespace sentencepiece
     }
 
     // Count character frequencies.
-    int64 all_chars_count = 0;
+    // int64 all_chars_count_1 = 0;
     // A map from a character to {is_required_char, character count}.
     absl::flat_hash_map<char32, std::pair<bool, int64>> chars_count;
     for (const char32 c :
@@ -732,7 +732,7 @@ namespace sentencepiece
     // }
 
     // Initialize character count variables
-    absl::flat_hash_map<char32, std::pair<int64, int64>> chars_count;
+
     int64 all_chars_count = 0;
 
     // Create a LevelDB iterator to iterate over all entries in the database
