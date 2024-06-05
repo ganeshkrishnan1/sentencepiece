@@ -6,7 +6,7 @@
                 "${workspaceFolder}/**",
                 "/opt/homebrew/Cellar/leveldb/1.23_1/include",
                 "/Library/Developer/CommandLineTools/SDKs/MacOSX14.0.sdk/**",
-                "${workspaceFolder}/third_party/protobuf-lite/google/protobuf"
+                "${workspaceFolder}/third_party/protobuf-lite/google/protobuf/**"
             ],
             "defines": [],
             "macFrameworkPath": [

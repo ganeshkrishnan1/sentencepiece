@@ -213,29 +213,55 @@ namespace sentencepiece
 
       const bool is_tsv = trainer_spec_.input_format() == "tsv";
 
-      for (auto &w : sentences_)
+      // for (auto &w : sentences_)
+      // {
+      // const auto ut = pretokenize_or_rewrite(&w);
+      //   for (const auto &c : ut)
+      //   {
+      //     array.push_back(c);
+      //     if (c != kUNKChar && c != kSentenceBoundary)
+      //     {
+      //       all_chars[string_util::UnicodeCharToUTF8(c)] += w.second;
+      //     }
+      //   }
+      //   array.push_back(kSentenceBoundary); // sentence boundary marker.
+
+      //   // Naive workaround to over-sample the input.
+      //   // In TSV mode, the frequency field is not used to extract the seed piece.
+      //   // we can at least extract all pieces by copying the input because
+      //   // the occurrence gets at least larger than or equals to 2.
+      //   if (is_tsv)
+      //   {
+      //     for (const auto &c : ut)
+      //       array.push_back(c);
+      //     array.push_back(kSentenceBoundary);
+      //   }
+      // }
+
+      std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+      for (it->SeekToFirst(); it->Valid(); it->Next())
       {
-        const auto ut = pretokenize_or_rewrite(&w);
+        std::string value = it->value().ToString();
+        size_t pos = value.find('\0');
+        if (pos == std::string::npos)
+        {
+          throw std::runtime_error("Corrupted value in LevelDB");
+        }
+        std::string sentence = value.substr(0, pos);
+        int64 freq = 1;
+        CHECK(absl::SimpleAtoi(value.substr(pos + 1), &freq))
+            << "Could not parse the frequency; value: " << value;
+        const auto ut = pretokenize_or_rewrite(&sentence);
         for (const auto &c : ut)
         {
-          array.push_back(c);
-          if (c != kUNKChar && c != kSentenceBoundary)
-          {
-            all_chars[string_util::UnicodeCharToUTF8(c)] += w.second;
-          }
+          all_chars[string_util::UnicodeCharToUTF8(c)] += freq;
         }
-        array.push_back(kSentenceBoundary); // sentence boundary marker.
-
-        // Naive workaround to over-sample the input.
-        // In TSV mode, the frequency field is not used to extract the seed piece.
-        // we can at least extract all pieces by copying the input because
-        // the occurrence gets at least larger than or equals to 2.
-        if (is_tsv)
-        {
-          for (const auto &c : ut)
-            array.push_back(c);
-          array.push_back(kSentenceBoundary);
-        }
+        array.insert(array.end(), ut.begin(), ut.end());
+        array.push_back(kSentenceBoundary);
+      }
+      if (!it->status().ok())
+      {
+        throw std::runtime_error("Failed to iterate LevelDB: " + it->status().ToString());
       }
 
       // all_chars must be included in the seed sentencepieces.

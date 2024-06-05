@@ -112,7 +112,8 @@ namespace sentencepiece
         }
         else
         {
-          symbol->freq += sentences_[pos.sid].second;
+          auto s = getSentenceFromDB(pos.sid);
+          symbol->freq += s.second;
           ++it;
         }
       }
@@ -224,18 +225,53 @@ namespace sentencepiece
       {
         absl::string_view delimiter = trainer_spec_.pretokenization_delimiter();
         LOG(INFO) << "Preprocessing with pretokenizer...";
-        for (auto &w : sentences_)
+
+        // for (auto &w : sentences_)
+        // {
+        //   if (pretokenizer)
+        //   {
+        //     w.first = absl::StrJoin(pretokenizer->PreTokenize(w.first),
+        //                             TrainerInterface::kUPPBoundaryStr);
+        //   }
+        //   else if (!delimiter.empty())
+        //   {
+        //     w.first = absl::StrReplaceAll(
+        //         w.first, {{delimiter, TrainerInterface::kUPPBoundaryStr}});
+        //   }
+        // }
+        std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+        for (it->SeekToFirst(); it->Valid(); it->Next())
         {
+          std::string value = it->value().ToString();
+          size_t pos = value.find('\0');
+          if (pos == std::string::npos)
+          {
+            throw std::runtime_error("Corrupted value in LevelDB");
+          }
+          std::string sentence = value.substr(0, pos);
+
+          // Perform preprocessing on the sentence
           if (pretokenizer)
           {
-            w.first = absl::StrJoin(pretokenizer->PreTokenize(w.first),
-                                    TrainerInterface::kUPPBoundaryStr);
+            sentence = absl::StrJoin(pretokenizer->PreTokenize(sentence), TrainerInterface::kUPPBoundaryStr);
           }
           else if (!delimiter.empty())
           {
-            w.first = absl::StrReplaceAll(
-                w.first, {{delimiter, TrainerInterface::kUPPBoundaryStr}});
+            sentence = absl::StrReplaceAll(sentence, {{delimiter, TrainerInterface::kUPPBoundaryStr}});
           }
+
+          // Update the value in LevelDB with the preprocessed sentence
+          value = sentence + '\0' + value.substr(pos + 1);
+          leveldb::Status s = db_->Put(leveldb::WriteOptions(), it->key(), value);
+          if (!s.ok())
+          {
+            throw std::runtime_error("Failed to update LevelDB: " + s.ToString());
+          }
+        }
+
+        if (!it->status().ok())
+        {
+          throw std::runtime_error("Failed to iterate LevelDB: " + it->status().ToString());
         }
       }
 

@@ -387,6 +387,7 @@ namespace sentencepiece
   {
     RETURN_IF_ERROR(status());
     // CHECK_OR_RETURN(sentences_.empty());
+    CHECK_OR_RETURN(getDBSize() == 0);
     CHECK_OR_RETURN(required_chars_.empty());
     CHECK_OR_RETURN(trainer_spec_.input_format().empty() ||
                     trainer_spec_.input_format() == "text" ||
@@ -658,7 +659,6 @@ namespace sentencepiece
       // sentences_.erase(it, sentences_.end());
 
       std::vector<std::string> keys_to_delete;
-      // std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
       for (it->SeekToFirst(); it->Valid(); it->Next())
       {
         std::string key = it->key().ToString();
