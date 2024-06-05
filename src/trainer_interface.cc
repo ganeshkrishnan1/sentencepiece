@@ -36,6 +36,7 @@
 #include "third_party/absl/strings/str_split.h"
 #include "unicode_script.h"
 #include "util.h"
+#include <leveldb/write_batch.h>
 
 namespace sentencepiece
 {
@@ -232,17 +233,17 @@ namespace sentencepiece
     read_done_ = fp_ && fp_->ReadLine(&value_);
   }
 
-  TrainerInterface::TrainerInterface(const TrainerSpec &trainer_spec,
-                                     const NormalizerSpec &normalizer_spec,
-                                     const NormalizerSpec &denormalizer_spec)
-      : trainer_spec_(trainer_spec),
-        normalizer_spec_(normalizer_spec),
-        denormalizer_spec_(denormalizer_spec)
-  {
-    status_ = VerifySpec(trainer_spec_);
-    if (status_.ok())
-      status_ = InitMetaPieces();
-  }
+  // TrainerInterface::TrainerInterface(const TrainerSpec &trainer_spec,
+  //                                    const NormalizerSpec &normalizer_spec,
+  //                                    const NormalizerSpec &denormalizer_spec)
+  //     : trainer_spec_(trainer_spec),
+  //       normalizer_spec_(normalizer_spec),
+  //       denormalizer_spec_(denormalizer_spec)
+  // {
+  //   status_ = VerifySpec(trainer_spec_);
+  //   if (status_.ok())
+  //     status_ = InitMetaPieces();
+  // }
 
   TrainerInterface::~TrainerInterface() {}
 
@@ -367,16 +368,13 @@ namespace sentencepiece
   }
 
   template <typename T>
-  void AddDPNoise(const TrainerSpec &trainer_spec, std::mt19937 *generator,
-                  T *to_update)
+  void AddDPNoise(const TrainerSpec &trainer_spec, std::mt19937 *generator, T *to_update)
   {
     if (trainer_spec.differential_privacy_noise_level() > 0)
     {
-      std::normal_distribution<float> dist(
-          0.0f, trainer_spec.differential_privacy_noise_level());
+      std::normal_distribution<float> dist(0.0f, trainer_spec.differential_privacy_noise_level());
       const float random_num = dist(*generator);
-      *to_update =
-          std::round(std::max(0.f, random_num + static_cast<float>(*to_update)));
+      *to_update = std::round(std::max(0.f, random_num + static_cast<float>(*to_update)));
     }
     // Clip anything below the clipping threshold to 0.
     if (*to_update < trainer_spec.differential_privacy_clipping_threshold())
@@ -483,6 +481,8 @@ namespace sentencepiece
     // Emits error message if any.
     selector.Finish();
 
+    std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+
     if (getDBSize() == selector.total_size())
     {
       LOG(INFO) << "Loaded all " << getDBSize() << " sentences";
@@ -510,34 +510,66 @@ namespace sentencepiece
       const normalizer::PrefixMatcher meta_pieces_matcher(meta_pieces_set);
 
       LOG(INFO) << "Normalizing sentences...";
+      // CHECK_OR_RETURN(getDBSize() > 0);
+      // {
+      //   auto pool = std::make_unique<ThreadPool>(trainer_spec_.num_threads());
+      //   pool->StartWorkers();
+      //   for (int n = 0; n < trainer_spec_.num_threads(); ++n)
+      //   {
+      //     pool->Schedule([&, n]()
+      //                    {
+      //     for (size_t i = n; i < getDBSize();
+      //          i += trainer_spec_.num_threads()) {
+      //       auto *s = getSentenceFromDB(i).first;
+      //       *s = meta_pieces_matcher.GlobalReplace(normalizer.Normalize(*s),kUPPBoundaryStr);
+      //     } });
+      //   }
+      // }
+
+      // Ensure there are sentences to process
       CHECK_OR_RETURN(getDBSize() > 0);
+      // Create a thread pool with the specified number of threads
+      auto pool = std::make_unique<ThreadPool>(trainer_spec_.num_threads());
+      pool->StartWorkers();
+
+      for (int n = 0; n < trainer_spec_.num_threads(); ++n)
       {
-        auto pool = std::make_unique<ThreadPool>(trainer_spec_.num_threads());
-        pool->StartWorkers();
-        for (int n = 0; n < trainer_spec_.num_threads(); ++n)
-        {
-          pool->Schedule([&, n]()
-                         {
-          for (size_t i = n; i < getDBSize();
-               i += trainer_spec_.num_threads()) {
-            auto *s = getSentenceFromDB(i).first;
-            *s = meta_pieces_matcher.GlobalReplace(normalizer.Normalize(*s),kUPPBoundaryStr);
-          } });
-        }
+        pool->Schedule([&, n]()
+                       {
+            for (size_t i = n; i < getDBSize(); i += trainer_spec_.num_threads())
+            {
+                // Retrieve the sentence from the database
+                auto sentence_pair = getSentenceFromDB(i); // This is a std::pair<std::string, int64_t>
+                std::string &sentence = sentence_pair.first;
+
+                // Normalize the sentence
+                sentence = meta_pieces_matcher.GlobalReplace(normalizer.Normalize(sentence), kUPPBoundaryStr);
+
+                // Update the sentence back in the database
+                updateSentenceInDB(i, sentence_pair);
+            } });
       }
+
+      // Wait for all threads to complete
+      // pool->JoinAll();
 
       for (size_t i = 0; i < getDBSize(); ++i)
       {
-        auto *s = getSentenceFromDB(i).first;
-        CHECK_OR_RETURN(s->find(" ") == std::string::npos)
-            << "Normalized string must not include spaces";
-        if (s->empty())
-        {
-          // std::swap(getSentenceFromDB(i), getSentenceFromDB(getDBSize() - 1));
-          updateSentenceInDB(i, getSentenceFromDB(getDBSize() - 1));
-          updateSentenceInDB(getDBSize() - 1, getSentenceFromDB(i));
+        auto sentence_pair = getSentenceFromDB(i);
+        std::string &sentence = sentence_pair.first;
 
-          // sentences_.resize(sentences_.size() - 1);
+        // Check if the normalized string includes spaces
+        CHECK_OR_RETURN(sentence.find(" ") == std::string::npos) << "Normalized string must not include spaces";
+
+        if (sentence.empty())
+        {
+          // Get the last sentence from the database
+          auto last_sentence_pair = getSentenceFromDB(getDBSize() - 1);
+
+          // Update the current sentence with the last sentence
+          updateSentenceInDB(i, last_sentence_pair);
+
+          // Remove the last sentence from the database
           removeSentenceFromDB(getDBSize() - 1);
         }
       }
@@ -568,32 +600,90 @@ namespace sentencepiece
       const auto num_workers =
           std::min<uint64>(trainer_spec_.num_threads(), getDBSize() - 1);
 
+      auto pool = std::make_unique<ThreadPool>(num_workers);
+      pool->StartWorkers();
+
+      // for (int n = 0; n < num_workers; ++n)
+      // {
+      //   pool->Schedule([&, n]()
+      //                  {
+      //     // One per thread generator.
+      //     auto *generator = random::GetRandomGenerator();
+      //     for (size_t i = n; i < getDBSize(); i += num_workers)
+      //     {
+      //       auto *s = getSentenceFromDB(i).first;
+      //       AddDPNoise<int64>(trainer_spec_, generator, s);
+      //     } });
+      // }
+
+      size_t db_size = getDBSize();
+
+      for (int n = 0; n < num_workers; ++n)
       {
-        auto pool = std::make_unique<ThreadPool>(num_workers);
-        pool->StartWorkers();
-        for (int n = 0; n < num_workers; ++n)
-        {
-          pool->Schedule([&, n]()
-                         {
-          // One per thread generator.
-          auto *generator = random::GetRandomGenerator();
-          for (size_t i = n; i < getDBSize(); i += num_workers)
-          {
-            auto *s = getSentenceFromDB(i).first;
-            AddDPNoise<int64>(trainer_spec_, generator, s);
-          } });
-        }
+        pool->Schedule([&, n]()
+                       {
+            // One per thread generator.
+            std::mt19937 generator(std::random_device{}());
+
+            for (size_t i = n; i < db_size; i += num_workers)
+            {
+                try {
+                    // Retrieve sentence from DB
+                    auto sentence_pair = getSentenceFromDB(i); // Assuming this returns a std::pair<std::string, int64_t>
+                    int64_t count = sentence_pair.second;
+
+                    // Apply differential privacy noise
+                    AddDPNoise<int64_t>(trainer_spec_, &generator, &count);
+
+                    // Update sentence count in the database
+                    sentence_pair.second = count;
+                    updateSentenceInDB(i, sentence_pair);
+
+                    // Log the processed sentence
+                    std::cout << "Processed sentence: " << sentence_pair.first << ", Updated count: " << count << std::endl;
+                } catch (const std::exception &e) {
+                    std::cerr << "Error processing sentence at index " << i << ": " << e.what() << std::endl;
+                }
+            } });
       }
 
       // Remove zero freq elements.
       const auto before_size = getDBSize();
 
-      auto it = std::remove_if(sentences_.begin(), sentences_.end(),
-                               [](const Sentence &s)
-                               { return s.second <= 0; });
-      const auto new_size = std::distance(sentences_.begin(), it);
+      // auto it = std::remove_if(sentences_.begin(), sentences_.end(),
+      //                          [](const Sentence &s)
+      //                          { return s.second <= 0; });
+      // const auto new_size = std::distance(sentences_.begin(), it);
+      // const int num_erased = before_size - new_size;
+      // sentences_.erase(it, sentences_.end());
+
+      std::vector<std::string> keys_to_delete;
+      // std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+      for (it->SeekToFirst(); it->Valid(); it->Next())
+      {
+        std::string key = it->key().ToString();
+        std::string value = it->value().ToString();
+
+        size_t pos = value.find('\0');
+        if (pos == std::string::npos)
+        {
+          return util::Status(sentencepiece::util::StatusCode::kDataLoss, "Corrupted value in LevelDB");
+        }
+
+        int64 count = std::stoll(value.substr(pos + 1));
+        if (count <= 0)
+        {
+          keys_to_delete.push_back(key);
+        }
+      }
+
+      for (const auto &key : keys_to_delete)
+      {
+        db_->Delete(leveldb::WriteOptions(), key);
+      }
+
+      const auto new_size = getDBSize();
       const int num_erased = before_size - new_size;
-      sentences_.erase(it, sentences_.end());
 
       LOG(INFO) << "DP noise resulted in " << 1.0 * num_erased / before_size
                 << " fraction of sentences removed.";
@@ -615,30 +705,86 @@ namespace sentencepiece
       }
       chars_count[c].first = true; // is_required_character.
     }
-    for (const auto &w : sentences_)
+
+    // for (const auto &w : sentences_)
+    // {
+    //   for (const char32 c : string_util::UTF8ToUnicodeText(w.first))
+    //   {
+    //     if (!string_util::IsValidCodepoint(c))
+    //       continue;
+    //     if (c == 0x0000)
+    //     {
+    //       LOG(INFO)
+    //           << "Found null character. The corpus must be encoded in utf-8.";
+    //       continue;
+    //     }
+    //     if (c == 0x0020)
+    //     {
+    //       // UTF8ToUnicodeText returns a white space if the text
+    //       // contains an interchange-invalid character.
+    //       CHECK_OR_RETURN(w.first.find(" ") == std::string::npos)
+    //           << "space must not be included in normalized string.";
+    //       continue;
+    //     }
+    //     chars_count[c].second += w.second;
+    //     all_chars_count += w.second;
+    //   }
+    // }
+
+    // Initialize character count variables
+    absl::flat_hash_map<char32, std::pair<int64, int64>> chars_count;
+    int64 all_chars_count = 0;
+
+    // Create a LevelDB iterator to iterate over all entries in the database
+    // std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+    for (it->SeekToFirst(); it->Valid(); it->Next())
     {
-      for (const char32 c : string_util::UTF8ToUnicodeText(w.first))
+      std::string key = it->key().ToString();
+      std::string value = it->value().ToString();
+
+      // Parse the sentence and count from the value
+      size_t pos = value.find('\0');
+      if (pos == std::string::npos)
+      {
+        return util::Status(sentencepiece::util::StatusCode::kDataLoss, "Corrupted value in LevelDB");
+      }
+
+      std::string sentence = value.substr(0, pos);
+      int64 count = std::stoll(value.substr(pos + 1));
+
+      for (const char32 c : string_util::UTF8ToUnicodeText(sentence))
       {
         if (!string_util::IsValidCodepoint(c))
+        {
           continue;
+        }
+
         if (c == 0x0000)
         {
           LOG(INFO)
               << "Found null character. The corpus must be encoded in utf-8.";
           continue;
         }
+
         if (c == 0x0020)
         {
           // UTF8ToUnicodeText returns a white space if the text
           // contains an interchange-invalid character.
-          CHECK_OR_RETURN(w.first.find(" ") == std::string::npos)
+          CHECK_OR_RETURN(sentence.find(" ") == std::string::npos)
               << "space must not be included in normalized string.";
           continue;
         }
-        chars_count[c].second += w.second;
-        all_chars_count += w.second;
+
+        chars_count[c].second += count;
+        all_chars_count += count;
       }
     }
+
+    if (!it->status().ok())
+    {
+      return util::Status(sentencepiece::util::StatusCode::kDataLoss, "Error reading from LevelDB: " + it->status().ToString());
+    }
+
     LOG(INFO) << "all chars count=" << all_chars_count;
 
     // Determines required_chars which must be included in the vocabulary.
@@ -671,10 +817,43 @@ namespace sentencepiece
 
     // Replaces rare characters (characters not included in required_chars_)
     // with kUNKChar.
-    for (auto &w : sentences_)
+
+    // for (auto &w : sentences_)
+    // {
+    //   string_util::UnicodeText uw2;
+    //   for (const char32 c : string_util::UTF8ToUnicodeText(w.first))
+    //   {
+    //     if (port::ContainsKey(required_chars_, c))
+    //     {
+    //       uw2.push_back(c);
+    //     }
+    //     else
+    //     {
+    //       uw2.push_back(kUNKChar);
+    //     }
+    //   }
+    //   w.first = string_util::UnicodeTextToUTF8(uw2);
+    // }
+
+    // std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+    for (it->SeekToFirst(); it->Valid(); it->Next())
     {
+      // Get the key and value from the iterator
+      std::string key = it->key().ToString();
+      std::string value = it->value().ToString();
+
+      // Parse the sentence and count from the value
+      size_t pos = value.find('\0');
+      if (pos == std::string::npos)
+      {
+        return util::Status(sentencepiece::util::StatusCode::kDataLoss, "Corrupted value in LevelDB");
+      }
+
+      std::string sentence = value.substr(0, pos);
+      int64 count = std::stoll(value.substr(pos + 1));
+
       string_util::UnicodeText uw2;
-      for (const char32 c : string_util::UTF8ToUnicodeText(w.first))
+      for (const char32 c : string_util::UTF8ToUnicodeText(sentence))
       {
         if (port::ContainsKey(required_chars_, c))
         {
@@ -685,8 +864,26 @@ namespace sentencepiece
           uw2.push_back(kUNKChar);
         }
       }
-      w.first = string_util::UnicodeTextToUTF8(uw2);
+      // Convert processed UnicodeText back to UTF-8
+      std::string updated_sentence = string_util::UnicodeTextToUTF8(uw2);
+
+      // Create the updated value to store in the database
+      std::string updated_value = updated_sentence + '\0' + std::to_string(count);
+
+      // Write the updated entry back to the database
+      leveldb::Status s = db_->Put(leveldb::WriteOptions(), key, updated_value);
+      if (!s.ok())
+      {
+        return util::Status(sentencepiece::util::StatusCode::kDataLoss, "Failed to write to LevelDB: " + s.ToString());
+      }
     }
+    // Check for any errors in the iterator
+    if (!it->status().ok())
+    {
+      return util::Status(sentencepiece::util::StatusCode::kDataLoss, "Error reading from LevelDB: " + it->status().ToString());
+    }
+
+    // Close the iterator and the database
 
     if (trainer_spec_.model_type() != TrainerSpec::WORD &&
         trainer_spec_.model_type() != TrainerSpec::CHAR)
@@ -706,22 +903,92 @@ namespace sentencepiece
     return util::OkStatus();
   }
 
+  // void TrainerInterface::SplitSentencesByWhitespace()
+  // {
+  //   LOG(INFO) << "Tokenizing input sentences with whitespace: "
+  //             << getDBSize();
+  //   absl::flat_hash_map<std::string, int64> tokens;
+  //   for (const auto &s : sentences_)
+  //   {
+  //     for (const auto &w :
+  //          SplitIntoWords(s.first, trainer_spec_.treat_whitespace_as_suffix(),
+  //                         trainer_spec_.allow_whitespace_only_pieces()))
+  //     {
+  //       tokens[std::string(w)] += s.second;
+  //     }
+  //   }
+  //   sentences_ = Sorted(tokens);
+  //   LOG(INFO) << "Done! " << sentences_.size();
+  // }
+
   void TrainerInterface::SplitSentencesByWhitespace()
   {
-    LOG(INFO) << "Tokenizing input sentences with whitespace: "
-              << getDBSize();
+    LOG(INFO) << "Tokenizing input sentences with whitespace: " << getDBSize();
     absl::flat_hash_map<std::string, int64> tokens;
-    for (const auto &s : sentences_)
+
+    // Create a LevelDB iterator to iterate over all entries in the database
+    std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+    for (it->SeekToFirst(); it->Valid(); it->Next())
     {
-      for (const auto &w :
-           SplitIntoWords(s.first, trainer_spec_.treat_whitespace_as_suffix(),
-                          trainer_spec_.allow_whitespace_only_pieces()))
+      // Get the key and value from the iterator
+      std::string key = it->key().ToString();
+      std::string value = it->value().ToString();
+
+      // Parse the sentence and count from the value
+      size_t pos = value.find('\0');
+      if (pos == std::string::npos)
       {
-        tokens[std::string(w)] += s.second;
+        LOG(ERROR) << "Corrupted value in LevelDB";
+        continue;
+      }
+
+      std::string sentence = value.substr(0, pos);
+      int64 count = std::stoll(value.substr(pos + 1));
+
+      // Split the sentence into words and update token counts
+      for (const auto &w : SplitIntoWords(sentence, trainer_spec_.treat_whitespace_as_suffix(), trainer_spec_.allow_whitespace_only_pieces()))
+      {
+        tokens[std::string(w)] += count;
       }
     }
-    sentences_ = Sorted(tokens);
-    LOG(INFO) << "Done! " << sentences_.size();
+
+    // Check for any errors in the iterator
+    if (!it->status().ok())
+    {
+      LOG(ERROR) << "Error reading from LevelDB: " << it->status().ToString();
+      return;
+    }
+
+    // Clear the database before storing the sorted tokens
+    leveldb::WriteBatch batch;
+    for (it->SeekToFirst(); it->Valid(); it->Next())
+    {
+      batch.Delete(it->key());
+    }
+    leveldb::Status s = db_->Write(leveldb::WriteOptions(), &batch);
+    if (!s.ok())
+    {
+      LOG(ERROR) << "Failed to clear LevelDB: " << s.ToString();
+      return;
+    }
+
+    // Store the sorted tokens back into the LevelDB
+    auto sorted_tokens = Sorted(tokens);
+    for (size_t i = 0; i < sorted_tokens.size(); ++i)
+    {
+      const auto &token = sorted_tokens[i];
+      std::string key = std::to_string(i);
+      std::string value = token.first + '\0' + std::to_string(token.second);
+
+      leveldb::Status s = db_->Put(leveldb::WriteOptions(), key, value);
+      if (!s.ok())
+      {
+        LOG(ERROR) << "Failed to write to LevelDB: " << s.ToString();
+        return;
+      }
+    }
+
+    LOG(INFO) << "Done! " << sorted_tokens.size();
   }
 
   util::Status TrainerInterface::Serialize(ModelProto *model_proto) const
