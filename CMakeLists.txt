@@ -199,4 +199,5 @@ project(sentencepiece LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 
+
 find_package(LevelDB REQUIRED)
