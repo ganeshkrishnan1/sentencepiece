@@ -30,9 +30,6 @@
 #include "third_party/absl/container/flat_hash_map.h"
 #include "util.h"
 
-#include <stxxl/vector>
-#include <stxxl/aligned_alloc>
-
 namespace sentencepiece
 {
 
@@ -82,8 +79,7 @@ namespace sentencepiece
   {
   public:
     using Sentence = std::pair<std::string, int64>;
-    // using Sentences = std::vector<Sentence>;
-    using Sentences = stxxl::vector<Sentence>;
+    using Sentences = std::vector<Sentence>;
 
     static const char32 kWSChar;
     static const char32 kUNKChar;

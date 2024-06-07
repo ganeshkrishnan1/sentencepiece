@@ -3,7 +3,8 @@
         "vector": "cpp",
         "deque": "cpp",
         "algorithm": "cpp",
-        "iosfwd": "cpp"
+        "iosfwd": "cpp",
+        "*.in": "cpp"
     },
     "C_Cpp.errorSquiggles": "enabled"
 }

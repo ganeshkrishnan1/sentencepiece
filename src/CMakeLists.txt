@@ -92,9 +92,6 @@ else()
   add_definitions("-D_USE_INTERNAL_STRING_VIEW")
 endif()
 
-include_directories(${STXXL_INCLUDE_DIRS})
-link_directories(${STXXL_LIBRARY_DIRS})
-
 set(SPM_SRCS
   ${PROTOBUF_LITE_SRCS}
   ${SPM_PROTO_HDRS}
@@ -236,8 +233,6 @@ endif()
 add_library(sentencepiece-static STATIC ${SPM_SRCS})
 add_library(sentencepiece_train-static STATIC ${SPM_TRAIN_SRCS})
 
-target_link_libraries(sentencepiece ${STXXL_LIBRARIES})
-
 target_link_libraries(sentencepiece-static INTERFACE ${SPM_LIBS})
 target_link_libraries(sentencepiece_train-static INTERFACE sentencepiece-static ${SPM_LIBS})
 
@@ -299,8 +294,6 @@ target_link_libraries(spm_decode sentencepiece)
 target_link_libraries(spm_normalize sentencepiece sentencepiece_train)
 target_link_libraries(spm_train sentencepiece sentencepiece_train)
 target_link_libraries(spm_export_vocab sentencepiece)
-target_link_libraries(spm_train ${STXXL_LIBRARIES})
-
 
 if (SPM_ENABLE_NFKC_COMPILE)
   add_executable(compile_charsmap compile_charsmap_main.cc)
