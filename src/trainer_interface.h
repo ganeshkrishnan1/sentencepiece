@@ -21,6 +21,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <stxxl/vector>
 
 #include "common.h"
 #include "filesystem.h"
@@ -79,7 +80,7 @@ namespace sentencepiece
   {
   public:
     using Sentence = std::pair<std::string, int64>;
-    using Sentences = std::vector<Sentence>;
+    using Sentences = stxxl::vector<Sentence>;
 
     static const char32 kWSChar;
     static const char32 kUNKChar;

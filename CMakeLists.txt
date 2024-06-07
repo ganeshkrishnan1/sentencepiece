@@ -180,6 +180,10 @@ elseif (SPM_ABSL_PROVIDER STREQUAL "package")
   include_directories(${ABSL_INCLUDE_DIRS})
 endif()
 
+find_package(STXXL REQUIRED)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${STXXL_CXX_FLAGS}")
+include_directories(${STXXL_INCLUDE_DIRS})
+
 add_subdirectory(src)
 add_subdirectory(third_party)
 

@@ -294,6 +294,7 @@ target_link_libraries(spm_decode sentencepiece)
 target_link_libraries(spm_normalize sentencepiece sentencepiece_train)
 target_link_libraries(spm_train sentencepiece sentencepiece_train)
 target_link_libraries(spm_export_vocab sentencepiece)
+target_link_libraries(spm_train ${STXXL_LIBRARIES})
 
 if (SPM_ENABLE_NFKC_COMPILE)
   add_executable(compile_charsmap compile_charsmap_main.cc)
