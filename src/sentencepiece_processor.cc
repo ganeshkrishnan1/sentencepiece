@@ -40,6 +40,12 @@
 #include "unigram_model.h"
 #include "util.h"
 
+#include <stdexcept>
+#include <sstream>
+#include <leveldb/options.h>
+#include <leveldb/status.h>
+#include <leveldb/write_batch.h>
+
 namespace sentencepiece {
 namespace {
 
@@ -90,66 +96,91 @@ void ConvertToUnicodeSpansInternal(SentencePieceText *spt) {
 
 }  // namespace
 
-ImmutableSentencePieceText::ImmutableSentencePieceText()
-    : spt_(&SentencePieceText::default_instance()) {}
+ImmutableSentencePieceText_ImmutableSentencePiece::ImmutableSentencePieceText_ImmutableSentencePiece()
+  : piece_(""), surface_(""), id_(0), begin_(0), end_(0) {}
 
-ImmutableSentencePieceText::ImmutableSentencePieceText(
-    const SentencePieceText &spt)
-    : spt_(&spt) {}
-
-ImmutableSentencePieceText::~ImmutableSentencePieceText() {}
-
-ImmutableSentencePieceText_ImmutableSentencePiece::
-    ImmutableSentencePieceText_ImmutableSentencePiece()
-    : sp_(&SentencePieceText_SentencePiece::default_instance()) {}
-
-ImmutableSentencePieceText_ImmutableSentencePiece::
-    ImmutableSentencePieceText_ImmutableSentencePiece(
-        const SentencePieceText_SentencePiece &sp)
-    : sp_(&sp) {}
-
-const std::string &ImmutableSentencePieceText_ImmutableSentencePiece::piece()
-    const {
-  return sp_->piece();
+const std::string& ImmutableSentencePieceText_ImmutableSentencePiece::piece() const {
+  return piece_;
 }
 
-const std::string &ImmutableSentencePieceText_ImmutableSentencePiece::surface()
-    const {
-  return sp_->surface();
+const std::string& ImmutableSentencePieceText_ImmutableSentencePiece::surface() const {
+  return surface_;
 }
 
 uint32_t ImmutableSentencePieceText_ImmutableSentencePiece::id() const {
-  return sp_->id();
+  return id_;
 }
 
 uint32_t ImmutableSentencePieceText_ImmutableSentencePiece::begin() const {
-  return sp_->begin();
+  return begin_;
 }
 
 uint32_t ImmutableSentencePieceText_ImmutableSentencePiece::end() const {
-  return sp_->end();
+  return end_;
 }
 
-std::vector<ImmutableSentencePieceText_ImmutableSentencePiece>
-ImmutableSentencePieceText::pieces() const {
-  std::vector<ImmutableSentencePieceText_ImmutableSentencePiece> pieces(
-      spt_->pieces_size());
-  for (int i = 0; i < spt_->pieces_size(); ++i)
-    pieces[i] =
-        ImmutableSentencePieceText_ImmutableSentencePiece(spt_->pieces(i));
-  return pieces;
+ImmutableSentencePieceText_ImmutableSentencePiece ImmutableSentencePieceText::pieces(int index) const {
+  std::string key = std::to_string(index);
+  std::string value;
+  leveldb::Status status = db_->Get(leveldb::ReadOptions(), key, &value);
+  if (!status.ok()) {
+    throw std::runtime_error("Failed to get piece from LevelDB");
+  }
+  return ImmutableSentencePieceText_ImmutableSentencePiece::Deserialize(value);
+}
+
+std::string ImmutableSentencePieceText_ImmutableSentencePiece::Serialize() const {
+  std::ostringstream oss;
+  oss << piece_ << '\n' << surface_ << '\n' << id_ << '\n' << begin_ << '\n' << end_;
+  return oss.str();
+}
+
+ImmutableSentencePieceText_ImmutableSentencePiece ImmutableSentencePieceText_ImmutableSentencePiece::Deserialize(const std::string& data) {
+  std::istringstream iss(data);
+  ImmutableSentencePieceText_ImmutableSentencePiece piece;
+  std::getline(iss, piece.piece_);
+  std::getline(iss, piece.surface_);
+  iss >> piece.id_ >> piece.begin_ >> piece.end_;
+  return piece;
+}
+
+ImmutableSentencePieceText::ImmutableSentencePieceText()
+  : spt_(&SentencePieceText::default_instance()) {
+  OpenDB();
+}
+
+ImmutableSentencePieceText::ImmutableSentencePieceText(const SentencePieceText &spt)
+  : spt_(&spt) {
+  OpenDB();
+}
+
+ImmutableSentencePieceText::~ImmutableSentencePieceText() {
+  CloseDB();
+}
+
+void ImmutableSentencePieceText::OpenDB() {
+  leveldb::Options options;
+  options.create_if_missing = true;
+  leveldb::Status status = leveldb::DB::Open(options, db_name_, &db_);
+  if (!status.ok()) {
+    throw std::runtime_error("Failed to open LevelDB");
+  }
+}
+
+void ImmutableSentencePieceText::CloseDB() {
+  delete db_;
 }
 
 size_t ImmutableSentencePieceText::pieces_size() const {
-  return spt_->pieces_size();
+  std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+  size_t count = 0;
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    ++count;
+  }
+  return count;
 }
 
-ImmutableSentencePieceText_ImmutableSentencePiece
-ImmutableSentencePieceText::pieces(int index) const {
-  return ImmutableSentencePieceText_ImmutableSentencePiece(spt_->pieces(index));
-}
-
-const std::string &ImmutableSentencePieceText::text() const {
+const std::string& ImmutableSentencePieceText::text() const {
   return spt_->text();
 }
 
@@ -157,7 +188,7 @@ float ImmutableSentencePieceText::score() const {
   return spt_ ? spt_->score() : 0.0;
 }
 
-SentencePieceText *ImmutableSentencePieceText::mutable_proto() {
+SentencePieceText* ImmutableSentencePieceText::mutable_proto() {
   if (rep_ == nullptr) {
     rep_ = std::make_shared<SentencePieceText>();
     spt_ = rep_.get();
@@ -165,51 +196,117 @@ SentencePieceText *ImmutableSentencePieceText::mutable_proto() {
   return rep_.get();
 }
 
+void ImmutableSentencePieceText::ConvertToUnicodeSpansInternal() {
+    if (spt_ == nullptr) return;
+    ::sentencepiece::ConvertToUnicodeSpansInternal(const_cast<SentencePieceText*>(spt_));
+}
+
 void ImmutableSentencePieceText::ConvertToUnicodeSpans() {
-  ConvertToUnicodeSpansInternal(mutable_proto());
+    ConvertToUnicodeSpansInternal();
 }
 
 util::bytes ImmutableSentencePieceText::SerializeAsString() const {
   return spt_->SerializeAsString();
 }
 
-ImmutableNBestSentencePieceText::ImmutableNBestSentencePieceText() {}
-ImmutableNBestSentencePieceText::~ImmutableNBestSentencePieceText() {}
+void ImmutableSentencePieceText::AddPiece(int index, const ImmutableSentencePieceText_ImmutableSentencePiece& piece) {
+  std::string key = std::to_string(index);
+  std::string value = piece.Serialize();
+  leveldb::Status status = db_->Put(leveldb::WriteOptions(), key, value);
+  if (!status.ok()) {
+    throw std::runtime_error("Failed to add piece to LevelDB");
+  }
+}
+
+std::string ImmutableSentencePieceText::Serialize() const {
+  std::string output;
+  if (!spt_->SerializeToString(&output)) {
+    throw std::runtime_error("Failed to serialize SentencePieceText");
+  }
+  return output;
+}
+
+// Deserialize method
+ImmutableSentencePieceText ImmutableSentencePieceText::Deserialize(const std::string& data) {
+  SentencePieceText spt;
+  if (!spt.ParseFromString(data)) {
+    throw std::runtime_error("Failed to deserialize SentencePieceText");
+  }
+  return ImmutableSentencePieceText(spt);
+}
+
+ImmutableNBestSentencePieceText::ImmutableNBestSentencePieceText() {
+  OpenDB();
+}
+
+ImmutableNBestSentencePieceText::~ImmutableNBestSentencePieceText() {
+  CloseDB();
+}
+
+void ImmutableNBestSentencePieceText::OpenDB() {
+  leveldb::Options options;
+  options.create_if_missing = true;
+  leveldb::Status status = leveldb::DB::Open(options, db_name_, &db_);
+  if (!status.ok()) {
+    throw std::runtime_error("Failed to open LevelDB");
+  }
+}
+
+void ImmutableNBestSentencePieceText::CloseDB() {
+  if (db_) {
+    delete db_;
+    db_ = nullptr;
+  }
+}
 
 size_t ImmutableNBestSentencePieceText::nbests_size() const {
-  return rep_ ? rep_->nbests_size() : 0;
+  std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+  size_t count = 0;
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    ++count;
+  }
+  return count;
 }
 
-ImmutableSentencePieceText ImmutableNBestSentencePieceText::nbests(
-    int index) const {
-  return ImmutableSentencePieceText(rep_->nbests(index));
+ImmutableSentencePieceText ImmutableNBestSentencePieceText::nbests(int index) const {
+  std::string key = std::to_string(index);
+  std::string value;
+  leveldb::Status status = db_->Get(leveldb::ReadOptions(), key, &value);
+  if (!status.ok()) {
+    throw std::runtime_error("Failed to get nbest from LevelDB");
+  }
+  return ImmutableSentencePieceText::Deserialize(value);
 }
 
-std::vector<ImmutableSentencePieceText>
-ImmutableNBestSentencePieceText::nbests() const {
-  if (rep_ == nullptr) return {};
-  std::vector<ImmutableSentencePieceText> nbests(rep_->nbests_size());
-  for (int i = 0; i < rep_->nbests_size(); ++i)
-    nbests[i] = ImmutableSentencePieceText(rep_->nbests(i));
-  return nbests;
-}
-
-NBestSentencePieceText *ImmutableNBestSentencePieceText::mutable_proto() {
-  if (rep_ == nullptr) {
+NBestSentencePieceText* ImmutableNBestSentencePieceText::mutable_proto() {
+  if (!rep_) {
     rep_ = std::make_shared<NBestSentencePieceText>();
   }
   return rep_.get();
 }
 
 void ImmutableNBestSentencePieceText::ConvertToUnicodeSpans() {
-  if (!mutable_proto()) return;
-  for (auto &spt : *(mutable_proto()->mutable_nbests())) {
-    ConvertToUnicodeSpansInternal(&spt);
-  }
+    if (!mutable_proto()) return;
+    std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+        ImmutableSentencePieceText spt = ImmutableSentencePieceText::Deserialize(it->value().ToString());
+        spt.ConvertToUnicodeSpans();  // This is correct now
+        std::string key = it->key().ToString();
+        std::string value = spt.Serialize();
+        leveldb::Status status = db_->Put(leveldb::WriteOptions(), key, value);
+        if (!status.ok()) {
+            throw std::runtime_error("Failed to update nbest in LevelDB");
+        }
+    }
 }
 
-util::bytes ImmutableNBestSentencePieceText::SerializeAsString() const {
-  return rep_ ? rep_->SerializeAsString() : "";
+std::string ImmutableNBestSentencePieceText::SerializeAsString() const {
+  std::ostringstream oss;
+  std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(leveldb::ReadOptions()));
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    oss << it->key().ToString() << '\n' << it->value().ToString() << '\n';
+  }
+  return oss.str();
 }
 
 SentencePieceProcessor::SentencePieceProcessor() {}

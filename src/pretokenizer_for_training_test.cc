@@ -1,16 +1,3 @@
-// Copyright 2016 Google Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.!
 #include "pretokenizer_for_training.h"
 
 #include "testharness.h"
@@ -18,14 +5,15 @@
 #include "third_party/absl/strings/str_join.h"
 #include "third_party/absl/strings/str_split.h"
 #include "trainer_interface.h"
+#include "leveldb/db.h"
 
 namespace sentencepiece {
 namespace pretokenizer {
 
 class MockPretokenizer : public PretokenizerForTrainingInterface {
  public:
-  MockPretokenizer() {}
-  ~MockPretokenizer() {}
+  MockPretokenizer() : PretokenizerForTrainingInterface() {}
+  ~MockPretokenizer() override = default;
 
   SentencePieceText Tokenize(absl::string_view text) const override {
     return spt_;
@@ -34,6 +22,9 @@ class MockPretokenizer : public PretokenizerForTrainingInterface {
   util::Status status() const override { return util::OkStatus(); }
 
   void SetOutput(const SentencePieceText &spt) { spt_ = spt; }
+
+  // Expose db_ for testing
+  leveldb::DB* GetDB() const { return db_.get(); }
 
  private:
   SentencePieceText spt_;
@@ -67,11 +58,17 @@ TEST(PretokenizerForTrainingTest, BaseTest) {
 
     mock.SetOutput(spt);
 
-    const auto expected =
-        absl::StrCat("I", TrainerInterface::kWSStr, "love",
-                     TrainerInterface::kWSStr, "sentence||||piece");
-    EXPECT_EQ(expected,
-              absl::StrJoin(mock.PreTokenize("I love sentencepiece"), "||||"));
+    std::string key = mock.PreTokenize("I love sentencepiece");
+    
+    // Verify the content in LevelDB
+    std::string value;
+    leveldb::Status s = mock.GetDB()->Get(leveldb::ReadOptions(), "0", &value);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(value, absl::StrCat("I", TrainerInterface::kWSStr, "love"));
+    
+    s = mock.GetDB()->Get(leveldb::ReadOptions(), "1", &value);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(value, absl::StrCat("sentence", TrainerInterface::kWSStr, "piece"));
   }
 
   {
@@ -99,9 +96,25 @@ TEST(PretokenizerForTrainingTest, BaseTest) {
 
     mock.SetOutput(spt);
 
-    const auto expected = "これ||||は||||ペン||||です";
-    EXPECT_EQ(expected,
-              absl::StrJoin(mock.PreTokenize("これはペンです"), "||||"));
+    std::string key = mock.PreTokenize("これはペンです");
+    
+    // Verify the content in LevelDB
+    std::string value;
+    leveldb::Status s = mock.GetDB()->Get(leveldb::ReadOptions(), "0", &value);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(value, "これ");
+    
+    s = mock.GetDB()->Get(leveldb::ReadOptions(), "1", &value);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(value, "は");
+    
+    s = mock.GetDB()->Get(leveldb::ReadOptions(), "2", &value);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(value, "ペン");
+    
+    s = mock.GetDB()->Get(leveldb::ReadOptions(), "3", &value);
+    EXPECT_TRUE(s.ok());
+    EXPECT_EQ(value, "です");
   }
 }
 

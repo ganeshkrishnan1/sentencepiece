@@ -16,7 +16,6 @@
 
 import codecs
 import os
-import string
 import subprocess
 import sys
 from setuptools import Extension, setup
@@ -25,15 +24,19 @@ from setuptools.command.build_py import build_py as _build_py
 
 sys.path.append(os.path.join('.', 'test'))
 
+# Set LevelDB paths
+leveldb_include_dir = "C:/Program Files (x86)/leveldb/include"
+leveldb_lib_dir = "C:/Program Files (x86)/leveldb/lib"
+
+sentencepiece_include_dir="C:/Program Files (x86)/sentencepiece/include"
+sentencepiece_lib_dir="C:/Program Files (x86)/sentencepiece/lib"
 
 def long_description():
   with codecs.open('README.md', 'r', 'utf-8') as f:
     long_description = f.read()
   return long_description
 
-
 exec(open('src/sentencepiece/_version.py').read())
-
 
 def run_pkg_config(section, pkg_config_path=None):
   try:
@@ -48,7 +51,6 @@ def run_pkg_config(section, pkg_config_path=None):
     sys.exit(1)
   return output.strip().split()
 
-
 def is_sentencepiece_installed():
   try:
     subprocess.check_call('pkg-config sentencepiece --libs', shell=True)
@@ -56,102 +58,13 @@ def is_sentencepiece_installed():
   except subprocess.CalledProcessError:
     return False
 
-
 def get_cflags_and_libs(root):
   cflags = ['-std=c++17', '-I' + os.path.join(root, 'include')]
-  libs = []
-  if os.path.exists(os.path.join(root, 'lib/pkgconfig/sentencepiece.pc')):
-    libs = [
-        os.path.join(root, 'lib/libsentencepiece.a'),
-        os.path.join(root, 'lib/libsentencepiece_train.a'),
-    ]
-  elif os.path.exists(os.path.join(root, 'lib64/pkgconfig/sentencepiece.pc')):
-    libs = [
-        os.path.join(root, 'lib64/libsentencepiece.a'),
-        os.path.join(root, 'lib64/libsentencepiece_train.a'),
-    ]
+  libs = ['-L' + os.path.join(root, 'lib'), '-lsentencepiece', '-lsentencepiece_train']
   return cflags, libs
 
-
-class build_ext(_build_ext):
-  """Override build_extension to run cmake."""
-
-  def build_extension(self, ext):
-    cflags, libs = get_cflags_and_libs('../build/root')
-
-    if len(libs) == 0:
-      if is_sentencepiece_installed():
-        cflags = cflags + run_pkg_config('cflags')
-        libs = run_pkg_config('libs')
-      else:
-        subprocess.check_call(['./build_bundled.sh', __version__])
-        cflags, libs = get_cflags_and_libs('./build/root')
-
-    # Fix compile on some versions of Mac OSX
-    # See: https://github.com/neulab/xnmt/issues/199
-    if sys.platform == 'darwin':
-      cflags.append('-mmacosx-version-min=10.9')
-    else:
-      cflags.append('-Wl,-strip-all')
-      libs.append('-Wl,-strip-all')
-    if sys.platform == 'linux':
-      libs.append('-Wl,-Bsymbolic')
-    print('## cflags={}'.format(' '.join(cflags)))
-    print('## libs={}'.format(' '.join(libs)))
-    ext.extra_compile_args = cflags
-    ext.extra_link_args = libs
-    _build_ext.build_extension(self, ext)
-
-
-if os.name == 'nt':
-  # Must pre-install sentencepice into build directory.
-  arch = 'win32'
-  if sys.maxsize > 2**32:
-    arch = 'amd64'
-  if os.path.exists('..\\build\\root_{}\\lib'.format(arch)):
-    cflags = ['/std:c++17', '/I..\\build\\root_{}\\include'.format(arch)]
-    libs = [
-        '..\\build\\root_{}\\lib\\sentencepiece.lib'.format(arch),
-        '..\\build\\root_{}\\lib\\sentencepiece_train.lib'.format(arch),
-    ]
-  elif os.path.exists('..\\build\\root\\lib'):
-    cflags = ['/std:c++17', '/I..\\build\\root\\include']
-    libs = [
-        '..\\build\\root\\lib\\sentencepiece.lib',
-        '..\\build\\root\\lib\\sentencepiece_train.lib',
-    ]
-  else:
-    # build library locally with cmake and vc++.
-    cmake_arch = 'Win32'
-    if arch == 'amd64':
-      cmake_arch = 'x64'
-    subprocess.check_call([
-        'cmake',
-        'sentencepiece',
-        '-A',
-        cmake_arch,
-        '-B',
-        'build',
-        '-DSPM_ENABLE_SHARED=OFF',
-        '-DCMAKE_INSTALL_PREFIX=build\\root',
-    ])
-    subprocess.check_call([
-        'cmake',
-        '--build',
-        'build',
-        '--config',
-        'Release',
-        '--target',
-        'install',
-        '--parallel',
-        '8',
-    ])
-    cflags = ['/std:c++17', '/I.\\build\\root\\include']
-    libs = [
-        '.\\build\\root\\lib\\sentencepiece.lib',
-        '.\\build\\root\\lib\\sentencepiece_train.lib',
-    ]
-
+if is_sentencepiece_installed():
+  cflags, libs = run_pkg_config('cflags'), run_pkg_config('libs')
   SENTENCEPIECE_EXT = Extension(
       'sentencepiece._sentencepiece',
       sources=['src/sentencepiece/sentencepiece_wrap.cxx'],
@@ -160,11 +73,23 @@ if os.name == 'nt':
   )
   cmdclass = {}
 else:
+  cflags = ['/std:c++17', f'/I{leveldb_include_dir}', '/I.\\build\\root\\include', f'/I{sentencepiece_include_dir}']
+  libs = [
+      f'{leveldb_lib_dir}/leveldb.lib',
+      f'{sentencepiece_lib_dir}/sentencepiece.lib',
+      f'{sentencepiece_lib_dir}/sentencepiece_train.lib',
+  ]
+
   SENTENCEPIECE_EXT = Extension(
       'sentencepiece._sentencepiece',
       sources=['src/sentencepiece/sentencepiece_wrap.cxx'],
+      extra_compile_args=cflags,
+      extra_link_args=libs,
+      include_dirs=[sentencepiece_include_dir, leveldb_include_dir, '.\\build\\root\\include'],
+      libraries=['leveldb'],
+      library_dirs=[leveldb_lib_dir],
   )
-  cmdclass = {'build_ext': build_ext}
+  cmdclass = {'build_ext': _build_ext}
 
 setup(
     name='sentencepiece',

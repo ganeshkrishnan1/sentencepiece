@@ -152,24 +152,36 @@ TrainerModel::SentencePieces Trainer::MakeSeedSentencePiecesInternal() {
   // Pretokenizer is used as a constraint of piece extractions.
   const auto *pretokenizer = SentencePieceTrainer::GetPretokenizerForTraining();
 
-  auto pretokenize_or_rewrite = [&](std::pair<std::string, int64> *w) {
+  auto pretokenize_or_rewrite = [&](std::pair<std::string, int64_t> *w) {
     if (pretokenizer) {
-      std::vector<char32> chars;
-      for (const auto &w : pretokenizer->PreTokenize(w->first)) {
-        for (const auto &c : string_util::UTF8ToUnicodeText(w)) {
+      std::string key = pretokenizer->PreTokenize(w->first);
+      std::string value;
+      leveldb::Status status = pretokenizer->GetDB()->Get(leveldb::ReadOptions(), key, &value);
+      if (!status.ok()) {
+        // Handle error
+        return std::vector<char32_t>{};
+      }
+      std::vector<char32_t> chars;
+
+      // Inline logic for splitting the UTF-8 string
+      std::stringstream ss(value);
+      std::string token;
+      while (std::getline(ss, token, ' ')) {
+        for (const auto &c : string_util::UTF8ToUnicodeText(token)) {
           chars.push_back(c);
         }
         chars.push_back(kSentenceBoundary);
       }
+
       return chars;
     } else if (!trainer_spec_.pretokenization_delimiter().empty()) {
       // When delimiter is specified, tokenize the input with the delimiter.
       // For EM training, we assume that the delimiter doesn't exist and
       // rewrite the original sentence.
-      std::vector<char32> chars;
+      std::vector<char32_t> chars;
       absl::string_view delimiter = trainer_spec_.pretokenization_delimiter();
-      for (const auto &w : absl::StrSplit(w->first, delimiter)) {
-        for (const auto &c : string_util::UTF8ToUnicodeText(w)) {
+      for (const auto &token : absl::StrSplit(w->first, delimiter)) {
+        for (const auto &c : string_util::UTF8ToUnicodeText(token)) {
           chars.push_back(c);
         }
         chars.push_back(kSentenceBoundary);
@@ -178,7 +190,11 @@ TrainerModel::SentencePieces Trainer::MakeSeedSentencePiecesInternal() {
       w->first = absl::StrReplaceAll(w->first, {{delimiter, ""}});
       return chars;
     }
-    return string_util::UTF8ToUnicodeText(w->first);
+    std::vector<char32_t> result;
+    for (char32_t c : string_util::UTF8ToUnicodeText(w->first)) {
+      result.push_back(c);
+    }
+    return result;
   };
 
   // Merges all sentences into one array with 0x0000 delimiter.

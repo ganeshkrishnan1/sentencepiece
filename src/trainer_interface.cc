@@ -36,6 +36,7 @@
 #include "third_party/absl/strings/str_split.h"
 #include "unicode_script.h"
 #include "util.h"
+#include "leveldb/db.h"
 
 namespace sentencepiece {
 

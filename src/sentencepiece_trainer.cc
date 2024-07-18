@@ -60,32 +60,32 @@ util::Status SentencePieceTrainer::Train(
     const TrainerSpec &trainer_spec, const NormalizerSpec &normalizer_spec,
     const NormalizerSpec &denormalizer_spec,
     SentenceIterator *sentence_iterator, std::string *serialized_model_proto) {
-  auto copied_normalizer_spec = normalizer_spec;
-  RETURN_IF_ERROR(PopulateNormalizerSpec(&copied_normalizer_spec, false));
-  auto copied_denormalizer_spec = denormalizer_spec;
-  RETURN_IF_ERROR(PopulateNormalizerSpec(&copied_denormalizer_spec, true));
-  auto trainer = TrainerFactory::Create(trainer_spec, copied_normalizer_spec,
-                                        copied_denormalizer_spec);
-  std::string info =
-      absl::StrCat(PrintProto(trainer_spec, "trainer_spec"),
-                   PrintProto(copied_normalizer_spec, "normalizer_spec"));
-  if (!copied_denormalizer_spec.precompiled_charsmap().empty()) {
-    info += PrintProto(copied_denormalizer_spec, "denormalizer_spec");
-  } else {
-    info += "denormalizer_spec {}";
-  }
+    auto copied_normalizer_spec = normalizer_spec;
+    RETURN_IF_ERROR(PopulateNormalizerSpec(&copied_normalizer_spec, false));
+    auto copied_denormalizer_spec = denormalizer_spec;
+    RETURN_IF_ERROR(PopulateNormalizerSpec(&copied_denormalizer_spec, true));
+    auto trainer = TrainerFactory::Create(trainer_spec, copied_normalizer_spec,
+                                          copied_denormalizer_spec);
+    std::string info =
+        absl::StrCat(PrintProto(trainer_spec, "trainer_spec"),
+                     PrintProto(copied_normalizer_spec, "normalizer_spec"));
+    if (!copied_denormalizer_spec.precompiled_charsmap().empty()) {
+        info += PrintProto(copied_denormalizer_spec, "denormalizer_spec");
+    } else {
+        info += "denormalizer_spec {}";
+    }
 
-  LOG(INFO) << "Starts training with : \n" << info;
+    LOG(INFO) << "Starts training with : \n" << info;
 
-  if (serialized_model_proto) {
-    ModelProto model_proto;
-    RETURN_IF_ERROR(trainer->Train(sentence_iterator, &model_proto));
-    *serialized_model_proto = model_proto.SerializeAsString();
-  } else {
-    RETURN_IF_ERROR(trainer->Train(sentence_iterator, nullptr));
-  }
+    if (serialized_model_proto) {
+        ModelProto model_proto;
+        RETURN_IF_ERROR(trainer->Train(sentence_iterator, &model_proto));
+        *serialized_model_proto = model_proto.SerializeAsString();
+    } else {
+        RETURN_IF_ERROR(trainer->Train(sentence_iterator, nullptr));
+    }
 
-  return util::OkStatus();
+    return util::OkStatus();
 }
 
 // static

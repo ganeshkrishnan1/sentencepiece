@@ -190,15 +190,22 @@ util::Status Trainer::Train() {
     LOG(INFO) << "Preprocessing with pretokenizer...";
     for (auto &w : sentences_) {
       if (pretokenizer) {
-        w.first = absl::StrJoin(pretokenizer->PreTokenize(w.first),
-                                TrainerInterface::kUPPBoundaryStr);
+        std::string key = pretokenizer->PreTokenize(w.first);
+        leveldb::DB* db = pretokenizer->GetDB();
+        std::string value;
+        leveldb::Status status = db->Get(leveldb::ReadOptions(), key, &value);
+        if (status.ok()) {
+          w.first = value;
+        } else {
+          LOG(ERROR) << "Failed to retrieve pretokenized value from LevelDB: " << status.ToString();
+          // You might want to handle this error case appropriately
+        }
       } else if (!delimiter.empty()) {
         w.first = absl::StrReplaceAll(
             w.first, {{delimiter, TrainerInterface::kUPPBoundaryStr}});
       }
     }
   }
-
   // Initializes symbols_. symbols_[sid][i] stores an unary symbol.
   symbols_.resize(sentences_.size());
   for (size_t i = 0; i < sentences_.size(); ++i) {

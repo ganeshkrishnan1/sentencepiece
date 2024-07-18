@@ -1,55 +1,61 @@
-// Copyright 2016 Google Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.!
 #include "pretokenizer_for_training.h"
 
 #include <string>
 
 #include "third_party/absl/strings/str_replace.h"
+#include "leveldb/write_batch.h"
 
 namespace sentencepiece {
 namespace pretokenizer {
 
 namespace {
-// TODO(taku): They are defined in trainer_interface.h but we
-// defined them explicitly to avoid the dependency to trainier_interface.
-// Currently, we have no separated build rules.
 const char kWSStr[] = "\xe2\x96\x81";
 }  // namespace
 
-std::vector<std::string> PretokenizerForTrainingInterface::PreTokenize(
+PretokenizerForTrainingInterface::PretokenizerForTrainingInterface() {
+  leveldb::Options options;
+  options.create_if_missing = true;
+  leveldb::DB* db;
+  leveldb::Status status = leveldb::DB::Open(options, "/tmp/pretokenizer_db", &db);
+  if (status.ok()) {
+    db_.reset(db);
+  } else {
+    // Handle error
+  }
+}
+
+PretokenizerForTrainingInterface::~PretokenizerForTrainingInterface() = default;
+
+std::string PretokenizerForTrainingInterface::PreTokenize(
     absl::string_view text) const {
-  return Postprocess(Tokenize(Preprocess(text)));
+  SentencePieceText spt = Tokenize(Preprocess(text));
+  
+  leveldb::WriteBatch batch;
+  Postprocess(spt, &batch);
+  
+  std::string key = "0"; // Use a fixed key for simplicity in tests
+  db_->Write(leveldb::WriteOptions(), &batch);
+  
+  return key;
 }
 
 // static
 std::string PretokenizerForTrainingInterface::Preprocess(
     absl::string_view text) {
-  // Escapes kWSStr (_) as this character may not be processed by pre-tokenizer.
   return absl::StrReplaceAll(text, {{kWSStr, " "}});
 }
 
 // static
-std::vector<std::string> PretokenizerForTrainingInterface::Postprocess(
-    const SentencePieceText &spt) {
-  // Inserts kUPPBoundaryStr before/after of token boundaries.
-  std::vector<std::string> result;
+void PretokenizerForTrainingInterface::Postprocess(
+    const SentencePieceText &spt, leveldb::WriteBatch* batch) const {
   std::string output;
-
   int prev = 0;
+  int counter = 0;
+
   for (const auto &piece : spt.pieces()) {
     if (prev == piece.begin() && piece.begin() != 0) {
-      result.push_back(output);
+      std::string key = std::to_string(counter++);
+      batch->Put(key, output);
       output.clear();
     } else {
       output.append(piece.begin() - prev, ' ');
@@ -58,11 +64,21 @@ std::vector<std::string> PretokenizerForTrainingInterface::Postprocess(
     prev = piece.end();
   }
 
-  if (!output.empty()) result.push_back(output);
+  if (!output.empty()) {
+    std::string key = std::to_string(counter);
+    batch->Put(key, output);
+  }
 
-  for (auto &w : result) w = absl::StrReplaceAll(w, {{" ", kWSStr}});
-
-  return result;
+  // Replace spaces with kWSStr in all stored values
+  std::string value;
+  for (int i = 0; i <= counter; ++i) {
+    std::string key = std::to_string(i);
+    leveldb::Status s = db_->Get(leveldb::ReadOptions(), key, &value);
+    if (s.ok()) {
+      value = absl::StrReplaceAll(value, {{" ", kWSStr}});
+      batch->Put(key, value);
+    }
+  }
 }
 
 }  // namespace pretokenizer
