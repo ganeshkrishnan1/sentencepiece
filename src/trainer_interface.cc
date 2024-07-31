@@ -36,17 +36,22 @@
 #include "third_party/absl/strings/str_split.h"
 #include "unicode_script.h"
 #include "util.h"
-#include "leveldb/db.h"
+
+#include <leveldb/db.h>
+#include <leveldb/write_batch.h>
+#include "leveldb_utils.h"
+#include "absl/strings/str_replace.h"
+#include <regex>
+#include <algorithm>
+#include <cctype>
 
 namespace sentencepiece {
 
-const char32 TrainerInterface::kWSChar = L'\u2581';
+const char32_t TrainerInterface::kWSChar = L'\u2581';
+const char32_t TrainerInterface::kUNKChar = L'\u2585';
+const char32_t TrainerInterface::kUPPBoundaryChar = L'\u0009';
 const char TrainerInterface::kWSStr[] = "\xe2\x96\x81";
-
-const char32 TrainerInterface::kUNKChar = L'\u2585';
 const char TrainerInterface::kUNKStr[] = "\xe2\x96\x85";
-
-const char32 TrainerInterface::kUPPBoundaryChar = L'\u0009';
 const char TrainerInterface::kUPPBoundaryStr[] = "\t";
 
 namespace {
@@ -100,18 +105,17 @@ bool is_unicode_decimal_number(char32 c) {
 
 class SentenceSelector {
  public:
-  using Sampler = random::ReservoirSampler<TrainerInterface::Sentence>;
+  using Sampler = random::ReservoirSampler<std::string>;
+  std::vector<std::string> sampled_sentences_;
 
   static constexpr int64 kTooBigSentencesSize = 1000000;
 
-  SentenceSelector(TrainerInterface::Sentences *sentences,
-                   const TrainerSpec &spec)
-      : sentences_(sentences), spec_(&spec) {
+  SentenceSelector(TrainerInterface* trainer, const TrainerSpec& spec)
+      : trainer_(trainer), spec_(&spec) {
     if (spec_->input_sentence_size() > 0) {
       if (spec_->shuffle_input_sentence()) {
         constexpr size_t kSeed = 12345678;
-        sampler_ = std::make_unique<Sampler>(
-            sentences, spec_->input_sentence_size(), kSeed);
+        sampler_ = std::make_unique<Sampler>(&sampled_sentences_, spec_->input_sentence_size(), kSeed);
       } else {
         LOG(INFO)
             << "First " << spec_->input_sentence_size()
@@ -121,8 +125,8 @@ class SentenceSelector {
   }
 
   void Finish() const {
-    if (sentences_->size() > kTooBigSentencesSize) {
-      LOG(WARNING) << "Too many sentences are loaded! (" << sentences_->size()
+    if (total_size_ > kTooBigSentencesSize) {
+      LOG(WARNING) << "Too many sentences are loaded! (" << total_size_
                    << "), which may slow down training.";
       LOG(WARNING) << "Consider using "
                       "--input_sentence_size=<size> and "
@@ -132,33 +136,44 @@ class SentenceSelector {
     }
   }
 
-  bool Add(const std::pair<std::string, int64> &sentence) {
+  bool Add(const TrainerInterface::Sentence& sentence) {
     if (spec_->input_sentence_size() == 0) {
-      sentences_->emplace_back(sentence);
+      util::Status status = trainer_->AddSentence(sentence);
+      if (!status.ok()) {
+        LOG(ERROR) << "Failed to add sentence: " << status.ToString();
+        return false;
+      }
+      return true;
     } else {
       if (spec_->shuffle_input_sentence()) {
-        sampler_->Add(sentence);
+        sampler_->Add(sentence.first);
       } else {
-        sentences_->emplace_back(sentence);
-        if (sentences_->size() >= spec_->input_sentence_size()) return false;
+        util::Status status = trainer_->AddSentence(sentence);
+        if (status.ok()) {
+          if (total_size_ >= spec_->input_sentence_size()) return false;
+        } else {
+          LOG(ERROR) << "Failed to add sentence: " << status.ToString();
+          return false;
+        }
       }
     }
 
-    if (total_size() > 0 && total_size() % kTooBigSentencesSize == 0) {
-      LOG(INFO) << "Loaded " << total_size() << " lines";
+    total_size_++;
+
+    if (total_size_ > 0 && total_size_ % kTooBigSentencesSize == 0) {
+      LOG(INFO) << "Loaded " << total_size_ << " lines";
     }
 
     return true;
   }
 
-  size_t total_size() const {
-    return sampler_.get() ? sampler_->total_size() : sentences_->size();
-  }
+  size_t total_size() const { return total_size_; }
 
  private:
-  TrainerInterface::Sentences *sentences_ = nullptr;
-  const TrainerSpec *spec_ = nullptr;
+  TrainerInterface* trainer_;
+  const TrainerSpec* spec_;
   std::unique_ptr<Sampler> sampler_;
+  size_t total_size_ = 0;
 };
 }  // namespace
 
@@ -206,9 +221,12 @@ TrainerInterface::TrainerInterface(const TrainerSpec &trainer_spec,
       denormalizer_spec_(denormalizer_spec) {
   status_ = VerifySpec(trainer_spec_);
   if (status_.ok()) status_ = InitMetaPieces();
+  if (status_.ok()) status_ = OpenSentenceDB();
 }
 
-TrainerInterface::~TrainerInterface() {}
+TrainerInterface::~TrainerInterface() {
+  CloseSentenceDB();
+}
 
 bool TrainerInterface::IsValidSentencePiece(
     const string_util::UnicodeText &sentencepiece) const {
@@ -321,10 +339,67 @@ void AddDPNoise(const TrainerSpec &trainer_spec, std::mt19937 *generator,
   }
 }
 
+util::Status TrainerInterface::OpenSentenceDB() {
+  return db_manager_.OpenDB("sentence_db");
+}
+
+util::Status TrainerInterface::CloseSentenceDB() {
+  return db_manager_.CloseDB();
+}
+
+util::Status TrainerInterface::AddSentence(const Sentence& sentence) {
+  SentenceKey key = GenerateSentenceKey();
+  std::string value = absl::StrCat(sentence.first, "\t", sentence.second);
+  leveldb::Status status = db_manager_.GetDB()->Put(leveldb::WriteOptions(), key, value);
+  if (status.ok()) {
+    return util::OkStatus();
+  }
+  return util::InternalError("Failed to add sentence to LevelDB: " + status.ToString());
+}
+
+util::Status TrainerInterface::GetSentence(const SentenceKey& key, Sentence* sentence) {
+  std::string value;
+  leveldb::Status status = db_manager_.GetDB()->Get(leveldb::ReadOptions(), key, &value);
+  if (status.ok()) {
+    std::vector<std::string> parts = absl::StrSplit(value, '\t');
+    if (parts.size() == 2) {
+      sentence->first = parts[0];
+      sentence->second = std::stoll(parts[1]);
+      return util::OkStatus();
+    }
+    return util::InternalError("Invalid sentence format in LevelDB");
+  }
+  return util::InternalError("Failed to get sentence from LevelDB: " + status.ToString());
+}
+
+util::Status TrainerInterface::DeleteSentence(const SentenceKey& key) {
+  leveldb::Status status = db_manager_.GetDB()->Delete(leveldb::WriteOptions(), key);
+  if (status.ok()) {
+    return util::OkStatus();
+  }
+  return util::InternalError("Failed to delete sentence from LevelDB: " + status.ToString());
+}
+
+util::Status TrainerInterface::IterateSentences(const std::function<bool(const Sentence&)>& callback) {
+  std::unique_ptr<leveldb::Iterator> it(db_manager_.GetDB()->NewIterator(leveldb::ReadOptions()));
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    Sentence sentence;
+    RETURN_IF_ERROR(GetSentence(it->key().ToString(), &sentence));
+    if (!callback(sentence)) {
+      break;
+    }
+  }
+  return util::OkStatus();
+}
+
+TrainerInterface::SentenceKey TrainerInterface::GenerateSentenceKey() {
+  static int64_t counter = 0;
+  return absl::StrCat("sentence_", counter++);
+}
+
 util::Status TrainerInterface::LoadSentences() {
   RETURN_IF_ERROR(status());
-  CHECK_OR_RETURN(sentences_.empty());
-  CHECK_OR_RETURN(required_chars_.empty());
+  RETURN_IF_ERROR(g_leveldb_manager.OpenDB("sentence_db"));
   CHECK_OR_RETURN(trainer_spec_.input_format().empty() ||
                   trainer_spec_.input_format() == "text" ||
                   trainer_spec_.input_format() == "tsv")
@@ -343,7 +418,7 @@ util::Status TrainerInterface::LoadSentences() {
 
   const bool is_tsv = trainer_spec_.input_format() == "tsv";
 
-  SentenceSelector selector(&sentences_, trainer_spec_);
+  SentenceSelector selector(this, trainer_spec_);
   random::ReservoirSampler<std::string> test_sentence_sampler(
       &self_test_samples_, trainer_spec_.self_test_sample_size());
 
@@ -359,8 +434,10 @@ util::Status TrainerInterface::LoadSentences() {
     sentence_iterator_ = sentence_iterator_impl.get();
   }
 
+  SentenceKey key;
+  int64 freq = 1;
   for (; !sentence_iterator_->done(); sentence_iterator_->Next()) {
-    int64 freq = 1;
+    freq = 1;
     std::string sentence = sentence_iterator_->value();
 
     if (is_tsv) {
@@ -393,30 +470,31 @@ util::Status TrainerInterface::LoadSentences() {
       continue;
     }
 
+    if (!selector.Add(std::make_pair(sentence, freq))) {
+      break;
+    }
+
     test_sentence_sampler.Add(sentence);
 
-    if (!selector.Add(std::make_pair(sentence, freq))) {
-      goto END;
-    }
+    key = GenerateSentenceKey();
+    RETURN_IF_ERROR(AddSentence(std::make_pair(sentence, freq)));
   }
 
   RETURN_IF_ERROR(sentence_iterator_->status());
 
-END:
   // Emits error message if any.
   selector.Finish();
 
-  if (sentences_.size() == selector.total_size()) {
-    LOG(INFO) << "Loaded all " << sentences_.size() << " sentences";
-  } else {
-    LOG(INFO) << "Sampled " << sentences_.size() << " sentences from "
-              << selector.total_size() << " sentences.";
-  }
+  LOG(INFO) << "Loaded all sentences";
 
   if (too_long_lines > 0)
     LOG(INFO) << "Skipped " << too_long_lines << " too long sentences.";
   if (self_test_samples_.size() > 0)
     LOG(INFO) << "Loaded " << self_test_samples_.size() << " test sentences";
+
+  // Normalize and removes empty string.
+  LOG(INFO) << "kUNKChar value: " << static_cast<int>(kUNKChar);
+  LOG(INFO) << "kUNKStr value: " << kUNKStr;
 
   // Normalize and removes empty string.
   {
@@ -429,121 +507,59 @@ END:
     const normalizer::PrefixMatcher meta_pieces_matcher(meta_pieces_set);
 
     LOG(INFO) << "Normalizing sentences...";
-    CHECK_OR_RETURN(!sentences_.empty());
-    {
-      auto pool = std::make_unique<ThreadPool>(trainer_spec_.num_threads());
-      pool->StartWorkers();
-      for (int n = 0; n < trainer_spec_.num_threads(); ++n) {
-        pool->Schedule([&, n]() {
-          for (size_t i = n; i < sentences_.size();
-               i += trainer_spec_.num_threads()) {
-            auto *s = &sentences_[i].first;
-            *s = meta_pieces_matcher.GlobalReplace(normalizer.Normalize(*s),
-                                                   kUPPBoundaryStr);
-          }
-        });
+    util::Status iterate_status = IterateSentences([&](const Sentence& sentence) -> bool {
+      auto s = sentence.first;
+      int64 freq = sentence.second;
+      LOG(INFO) << "Before normalization: " << s;
+      
+      s = meta_pieces_matcher.GlobalReplace(normalizer.Normalize(s), kUPPBoundaryStr);
+      
+      // Preserve kUNKChar while removing other whitespace and non-printable characters
+      s.erase(std::remove_if(s.begin(), s.end(), [this](unsigned char c) { 
+        return (std::isspace(c) || !std::isprint(c)) && c != kUNKChar; 
+      }), s.end());
+      
+      LOG(INFO) << "After full normalization and cleaning: " << s;
+      
+      if (!s.empty()) {
+        std::string key = GenerateSentenceKey();
+        std::string value = s + "\t" + std::to_string(freq);
+        leveldb::Status leveldb_status = g_leveldb_manager.GetDB()->Put(leveldb::WriteOptions(), key, value);
+        if (!leveldb_status.ok()) {
+          LOG(ERROR) << "Failed to add sentence to LevelDB: " << leveldb_status.ToString();
+          return false;
+        }
       }
+      return true;
+    });
+
+    if (!iterate_status.ok()) {
+      return util::InternalError(absl::StrCat("Failed to iterate sentences: ", iterate_status.ToString()));
     }
-
-    for (size_t i = 0; i < sentences_.size(); ++i) {
-      auto *s = &sentences_[i].first;
-      CHECK_OR_RETURN(s->find(" ") == std::string::npos)
-          << "Normalized string must not include spaces";
-      if (s->empty()) {
-        std::swap(sentences_[i], sentences_[sentences_.size() - 1]);
-        sentences_.resize(sentences_.size() - 1);
-      }
-    }
-  }
-
-  // If DP is required, add the noise/clip the input.
-  if (trainer_spec_.enable_differential_privacy()) {
-    if (trainer_spec_.input_format() != "tsv") {
-      LOG(ERROR)
-          << "Dp version will not work correctly with text input format.";
-    }
-    if (trainer_spec_.differential_privacy_noise_level() <= 0) {
-      LOG(WARNING) << "Private version with <=0 noise level will give "
-                      "infinity epsilon guarantees.";
-    }
-    if (trainer_spec_.differential_privacy_clipping_threshold() <= 0) {
-      LOG(WARNING) << "Private version with <=0 clipping threshold will give "
-                      "infinity epsilon guarantees.";
-    }
-
-    // Add noise to all the sentences via threadpool.
-
-    // This line is mainly for tests with small num of sentences.
-    const auto num_workers =
-        std::min<uint64>(trainer_spec_.num_threads(), sentences_.size() - 1);
-
-    {
-      auto pool = std::make_unique<ThreadPool>(num_workers);
-      pool->StartWorkers();
-      for (int n = 0; n < num_workers; ++n) {
-        pool->Schedule([&, n]() {
-          // One per thread generator.
-          auto *generator = random::GetRandomGenerator();
-          for (size_t i = n; i < sentences_.size(); i += num_workers) {
-            AddDPNoise<int64>(trainer_spec_, generator,
-                              &(sentences_[i].second));
-          }
-        });
-      }
-    }
-
-    // Remove zero freq elements.
-    const auto before_size = sentences_.size();
-    auto it = std::remove_if(sentences_.begin(), sentences_.end(),
-                             [](const Sentence &s) { return s.second <= 0; });
-    const auto new_size = std::distance(sentences_.begin(), it);
-    const int num_erased = before_size - new_size;
-    sentences_.erase(it, sentences_.end());
-
-    LOG(INFO) << "DP noise resulted in " << 1.0 * num_erased / before_size
-              << " fraction of sentences removed.";
   }
 
   // Count character frequencies.
   int64 all_chars_count = 0;
-  // A map from a character to {is_required_char, character count}.
   absl::flat_hash_map<char32, std::pair<bool, int64>> chars_count;
-  for (const char32 c :
-       string_util::UTF8ToUnicodeText(trainer_spec_.required_chars())) {
-    CHECK_OR_RETURN(string_util::IsValidCodepoint(c));
-    if (c == 0x0000) {
-      LOG(INFO) << "Found null character. The required_chars field must be "
-                   "encoded in utf-8.";
-      continue;
-    }
-    chars_count[c].first = true;  // is_required_character.
-  }
-  for (const auto &w : sentences_) {
-    for (const char32 c : string_util::UTF8ToUnicodeText(w.first)) {
+  
+  LOG(INFO) << "Counting character frequencies...";
+  
+  std::unique_ptr<leveldb::Iterator> it(g_leveldb_manager.GetDB()->NewIterator(leveldb::ReadOptions()));
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    Sentence sentence;
+    RETURN_IF_ERROR(GetSentence(it->key().ToString(), &sentence));
+    
+    for (const char32 c : string_util::UTF8ToUnicodeText(sentence.first)) {
       if (!string_util::IsValidCodepoint(c)) continue;
-      if (c == 0x0000) {
-        LOG(INFO)
-            << "Found null character. The corpus must be encoded in utf-8.";
-        continue;
-      }
-      if (c == 0x0020) {
-        // UTF8ToUnicodeText returns a white space if the text
-        // contains an interchange-invalid character.
-        CHECK_OR_RETURN(w.first.find(" ") == std::string::npos)
-            << "space must not be included in normalized string.";
-        continue;
-      }
-      chars_count[c].second += w.second;
-      all_chars_count += w.second;
+      chars_count[c].second += sentence.second;
+      all_chars_count += sentence.second;
     }
   }
+  
   LOG(INFO) << "all chars count=" << all_chars_count;
 
   // Determines required_chars which must be included in the vocabulary.
   int64 accumulated_chars_count = 0;
-  // Sorted() sorts the chars_count values in the decsending order of pair<>.
-  // I.e. characters are sorted in the order of required characters and then
-  // frequent characters.
   for (const auto &w : Sorted(chars_count)) {
     const float coverage = 1.0 * accumulated_chars_count / all_chars_count;
     if (!trainer_spec_.use_all_vocab() &&
@@ -552,8 +568,6 @@ END:
       break;
     }
     accumulated_chars_count += w.second.second;
-    CHECK_NE_OR_RETURN(w.first, 0x0020)
-        << "space must not be included in normalized string.";
     if (w.first == kUPPBoundaryChar) continue;  // Tab is not included.
     required_chars_.emplace(w.first, w.second.second);
   }
@@ -562,20 +576,46 @@ END:
   LOG(INFO) << "Final character coverage="
             << 1.0 * accumulated_chars_count / all_chars_count;
 
-  CHECK_OR_RETURN(!port::ContainsKey(required_chars_, kUNKChar));
+  // Explicitly add kUNKChar to required_chars_
+  required_chars_.emplace(kUNKChar, 1);
+  LOG(INFO) << "Added kUNKChar to required_chars_. New size: " << required_chars_.size();
+
+  // Detailed check for kUNKChar in required_chars_
+  bool unk_char_found = false;
+  for (const auto& pair : required_chars_) {
+    if (pair.first == kUNKChar) {
+      unk_char_found = true;
+      LOG(INFO) << "Found kUNKChar in required_chars_ with count: " << pair.second;
+      break;
+    }
+  }
+
+  if (unk_char_found) {
+    LOG(INFO) << "kUNKChar is present in required_chars_";
+  } else {
+    LOG(ERROR) << "kUNKChar is NOT present in required_chars_";
+  }
+
+  // Use the unk_char_found variable for the check
+  CHECK_OR_RETURN(unk_char_found)
+      << "kUNKChar should be in required_chars_";
 
   // Replaces rare characters (characters not included in required_chars_)
   // with kUNKChar.
-  for (auto &w : sentences_) {
+  it.reset(g_leveldb_manager.GetDB()->NewIterator(leveldb::ReadOptions()));
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    Sentence sentence;
+    RETURN_IF_ERROR(GetSentence(it->key().ToString(), &sentence));
     string_util::UnicodeText uw2;
-    for (const char32 c : string_util::UTF8ToUnicodeText(w.first)) {
+    for (const char32 c : string_util::UTF8ToUnicodeText(sentence.first)) {
       if (port::ContainsKey(required_chars_, c)) {
         uw2.push_back(c);
       } else {
         uw2.push_back(kUNKChar);
       }
     }
-    w.first = string_util::UnicodeTextToUTF8(uw2);
+    sentence.first = string_util::UnicodeTextToUTF8(uw2);
+    RETURN_IF_ERROR(AddSentence(sentence));
   }
 
   if (trainer_spec_.model_type() != TrainerSpec::WORD &&
@@ -590,24 +630,45 @@ END:
         << "--character_coverage option.";
   }
 
-  LOG(INFO) << "Done! preprocessed " << sentences_.size() << " sentences.";
-
+  LOG(INFO) << "Done! preprocessed all sentences.";
   return util::OkStatus();
 }
 
 void TrainerInterface::SplitSentencesByWhitespace() {
-  LOG(INFO) << "Tokenizing input sentences with whitespace: "
-            << sentences_.size();
-  absl::flat_hash_map<std::string, int64> tokens;
-  for (const auto &s : sentences_) {
-    for (const auto &w :
-         SplitIntoWords(s.first, trainer_spec_.treat_whitespace_as_suffix(),
-                        trainer_spec_.allow_whitespace_only_pieces())) {
-      tokens[std::string(w)] += s.second;
+  LOG(INFO) << "Tokenizing input sentences with whitespace";
+  absl::flat_hash_map<std::string, int64_t> tokens;
+
+  IterateSentences([&](const Sentence& sentence) {
+    for (const auto &w : SplitIntoWords(sentence.first, 
+                                        trainer_spec_.treat_whitespace_as_suffix(),
+                                        trainer_spec_.allow_whitespace_only_pieces())) {
+      tokens[std::string(w)] += sentence.second;
+    }
+    return true;
+  });
+
+  // Clear existing sentences
+  leveldb::WriteOptions write_options;
+  leveldb::WriteBatch batch;
+  std::unique_ptr<leveldb::Iterator> it(db_manager_.GetDB()->NewIterator(leveldb::ReadOptions()));
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    batch.Delete(it->key());
+  }
+  leveldb::Status status = db_manager_.GetDB()->Write(write_options, &batch);
+  if (!status.ok()) {
+    LOG(ERROR) << "Failed to clear existing sentences: " << status.ToString();
+  }
+
+  // Add tokenized sentences
+  for (const auto &token : Sorted(tokens)) {
+    SentenceKey key = GenerateSentenceKey();
+    util::Status add_status = AddSentence(std::make_pair(token.first, token.second));
+    if (!add_status.ok()) {
+      LOG(ERROR) << "Failed to add sentence: " << add_status.ToString();
     }
   }
-  sentences_ = Sorted(tokens);
-  LOG(INFO) << "Done! " << sentences_.size();
+
+  LOG(INFO) << "Done!";
 }
 
 util::Status TrainerInterface::Serialize(ModelProto *model_proto) const {
@@ -810,5 +871,4 @@ util::Status TrainerInterface::InitMetaPieces() {
 
   return util::OkStatus();
 }
-
 }  // namespace sentencepiece

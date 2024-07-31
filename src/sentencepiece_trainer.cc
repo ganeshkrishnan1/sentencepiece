@@ -60,6 +60,7 @@ util::Status SentencePieceTrainer::Train(
     const TrainerSpec &trainer_spec, const NormalizerSpec &normalizer_spec,
     const NormalizerSpec &denormalizer_spec,
     SentenceIterator *sentence_iterator, std::string *serialized_model_proto) {
+    
     auto copied_normalizer_spec = normalizer_spec;
     RETURN_IF_ERROR(PopulateNormalizerSpec(&copied_normalizer_spec, false));
     auto copied_denormalizer_spec = denormalizer_spec;
@@ -77,16 +78,32 @@ util::Status SentencePieceTrainer::Train(
 
     LOG(INFO) << "Starts training with : \n" << info;
 
-    if (serialized_model_proto) {
-        ModelProto model_proto;
-        RETURN_IF_ERROR(trainer->Train(sentence_iterator, &model_proto));
-        *serialized_model_proto = model_proto.SerializeAsString();
-    } else {
-        RETURN_IF_ERROR(trainer->Train(sentence_iterator, nullptr));
+    util::Status status;
+    const int max_retries = 5;
+    const int retry_delay_ms = 1000; // 1 second
+
+    ModelProto model_proto; // Declare model_proto here
+
+    for (int attempt = 1; attempt <= max_retries; ++attempt) {
+        status = trainer->Train(sentence_iterator, serialized_model_proto ? &model_proto : nullptr);
+        if (status.ok()) {
+            if (serialized_model_proto) {
+                *serialized_model_proto = model_proto.SerializeAsString();
+            }
+            return util::OkStatus();
+        } else {
+            LOG(ERROR) << "Training attempt " << attempt << " failed with error: " << status.ToString();
+            if (attempt < max_retries) {
+                LOG(INFO) << "Retrying after " << retry_delay_ms << " milliseconds...";
+                std::this_thread::sleep_for(std::chrono::milliseconds(retry_delay_ms));
+            }
+        }
     }
 
-    return util::OkStatus();
+    return status;
 }
+
+
 
 // static
 NormalizerSpec SentencePieceTrainer::GetNormalizerSpec(absl::string_view name) {

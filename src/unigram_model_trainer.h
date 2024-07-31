@@ -26,6 +26,8 @@
 #include "unigram_model.h"
 #include "util.h"
 
+#include "leveldb_utils.h"
+
 namespace sentencepiece {
 namespace unigram {
 

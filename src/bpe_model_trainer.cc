@@ -25,8 +25,33 @@
 #include "third_party/absl/strings/str_replace.h"
 #include "util.h"
 
+#include <leveldb/db.h>
+#include "leveldb_utils.h"
+
 namespace sentencepiece {
 namespace bpe {
+
+// Constructor implementation
+Trainer::Trainer(const TrainerSpec &trainer_spec,
+                 const NormalizerSpec &normalizer_spec,
+                 const NormalizerSpec &denormalizer_spec)
+    : TrainerInterface(trainer_spec, normalizer_spec, denormalizer_spec) {
+  // Any additional initialization can go here
+}
+
+// Destructor implementation
+Trainer::~Trainer() {
+}
+
+// Implementation of OpenSentenceDB method
+util::Status Trainer::OpenSentenceDB() {
+  return g_leveldb_manager.OpenDB("sentence_db");
+}
+
+// Implementation of CloseSentenceDB method, if needed
+util::Status Trainer::CloseSentenceDB() {
+  return g_leveldb_manager.CloseDB();
+}
 
 std::string Trainer::Symbol::ToString() const {
   return string_util::UnicodeTextToUTF8(chars);
@@ -89,13 +114,21 @@ void Trainer::ComputeFreq(Symbol *symbol) const {
   CHECK_EQ(0, symbol->freq);
   for (auto it = symbol->positions.begin(); it != symbol->positions.end();) {
     const Position pos = DecodePos(*it);
-    // symbols_[sid][left] and symbols_[sid]right] must store
-    // the same symbols in symbol->left and symbols->right.
+    // symbols_[sid][left] and symbols_[sid][right] must store
+    // the same symbols in symbol->left and symbol->right.
     if (symbol->left != symbols_[pos.sid][pos.left] ||
         symbol->right != symbols_[pos.sid][pos.right]) {
       it = symbol->positions.erase(it);
     } else {
-      symbol->freq += sentences_[pos.sid].second;
+      std::string value;
+      std::string key = std::to_string(pos.sid);
+      leveldb::Status status = g_leveldb_manager.GetDB()->Get(leveldb::ReadOptions(), key, &value);
+      if (status.ok()) {
+        size_t tab_pos = value.find('\t');
+        if (tab_pos != std::string::npos) {
+          symbol->freq += std::stoll(value.substr(tab_pos + 1));
+        }
+      }
       ++it;
     }
   }
@@ -164,6 +197,7 @@ void Trainer::UpdateActiveSymbols() {
 }
 
 util::Status Trainer::Train() {
+  RETURN_IF_ERROR(OpenSentenceDB());
   RETURN_IF_ERROR(status());
 
   CHECK_OR_RETURN(normalizer_spec_.escape_whitespaces());
@@ -185,39 +219,36 @@ util::Status Trainer::Train() {
   // Pretokenizer is used as a constraint of piece extractions.
   const auto *pretokenizer = SentencePieceTrainer::GetPretokenizerForTraining();
 
-  if (pretokenizer || !trainer_spec_.pretokenization_delimiter().empty()) {
-    absl::string_view delimiter = trainer_spec_.pretokenization_delimiter();
-    LOG(INFO) << "Preprocessing with pretokenizer...";
-    for (auto &w : sentences_) {
-      if (pretokenizer) {
-        std::string key = pretokenizer->PreTokenize(w.first);
-        leveldb::DB* db = pretokenizer->GetDB();
-        std::string value;
-        leveldb::Status status = db->Get(leveldb::ReadOptions(), key, &value);
-        if (status.ok()) {
-          w.first = value;
-        } else {
-          LOG(ERROR) << "Failed to retrieve pretokenized value from LevelDB: " << status.ToString();
-          // You might want to handle this error case appropriately
+  std::unique_ptr<leveldb::Iterator> it(g_leveldb_manager.GetDB()->NewIterator(leveldb::ReadOptions()));
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    std::string value = it->value().ToString();
+    size_t tab_pos = value.find('\t');
+    if (tab_pos != std::string::npos) {
+      std::string sentence = value.substr(0, tab_pos);
+      int64_t freq = std::stoll(value.substr(tab_pos + 1));
+      
+      // Apply pretokenizer if needed
+      if (pretokenizer || !trainer_spec_.pretokenization_delimiter().empty()) {
+        if (pretokenizer) {
+          sentence = absl::StrJoin(pretokenizer->PreTokenize(sentence),
+                                  TrainerInterface::kUPPBoundaryStr);
+        } else if (!trainer_spec_.pretokenization_delimiter().empty()) {
+          sentence = absl::StrReplaceAll(
+              sentence, {{trainer_spec_.pretokenization_delimiter(), TrainerInterface::kUPPBoundaryStr}});
         }
-      } else if (!delimiter.empty()) {
-        w.first = absl::StrReplaceAll(
-            w.first, {{delimiter, TrainerInterface::kUPPBoundaryStr}});
       }
-    }
-  }
-  // Initializes symbols_. symbols_[sid][i] stores an unary symbol.
-  symbols_.resize(sentences_.size());
-  for (size_t i = 0; i < sentences_.size(); ++i) {
-    for (const char32 c : string_util::UTF8ToUnicodeText(sentences_[i].first)) {
-      symbols_[i].push_back(GetCharSymbol(c));
-    }
-  }
 
-  // Makes all bigram symbols.
-  for (size_t sid = 0; sid < symbols_.size(); ++sid) {
-    for (size_t i = 1; i < symbols_[sid].size(); ++i) {
-      AddNewPair(sid, i - 1, i);
+      // Initialize symbols for this sentence
+      std::vector<Symbol*> sentence_symbols;
+      for (const char32 c : string_util::UTF8ToUnicodeText(sentence)) {
+        sentence_symbols.push_back(GetCharSymbol(c));
+      }
+      symbols_.push_back(sentence_symbols);
+
+      // Make bigram symbols for this sentence
+      for (size_t i = 1; i < sentence_symbols.size(); ++i) {
+        AddNewPair(symbols_.size() - 1, i - 1, i);
+      }
     }
   }
 

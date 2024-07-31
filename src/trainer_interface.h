@@ -30,6 +30,10 @@
 #include "third_party/absl/container/flat_hash_map.h"
 #include "util.h"
 
+#include <leveldb/db.h>
+#include "leveldb_utils.h"
+
+
 namespace sentencepiece {
 
 template <typename K, typename V>
@@ -71,13 +75,19 @@ class MultiFileSentenceIterator : public SentenceIterator {
 
 // Base trainer class
 class TrainerInterface {
- public:
-  using Sentence = std::pair<std::string, int64>;
-  using Sentences = std::vector<Sentence>;
+public:
+  using Sentence = std::pair<std::string, int64_t>;
+  using SentenceKey = std::string;
 
-  static const char32 kWSChar;
-  static const char32 kUNKChar;
-  static const char32 kUPPBoundaryChar;
+  util::Status AddSentence(const Sentence& sentence);
+  util::Status GetSentence(const SentenceKey& key, Sentence* sentence);
+  util::Status DeleteSentence(const SentenceKey& key);
+  util::Status IterateSentences(const std::function<bool(const Sentence&)>& callback);
+  SentenceKey GenerateSentenceKey();
+
+  static const char32_t kWSChar;
+  static const char32_t kUNKChar;
+  static const char32_t kUPPBoundaryChar;
   static const char kWSStr[];
   static const char kUNKStr[];
   static const char kUPPBoundaryStr[];
@@ -107,11 +117,9 @@ class TrainerInterface {
   FRIEND_TEST(TrainerInterfaceTest, SerializeTest);
   FRIEND_TEST(TrainerInterfaceTest, CharactersTest);
 
-  // Loads all sentences from spec.input() or SentenceIterator.
-  // It loads at most input_sentence_size sentences.
-  util::Status LoadSentences();
-
- protected:
+protected:
+  util::Status OpenSentenceDB();
+  util::Status CloseSentenceDB();
   // Returns true if |piece| is valid sentence piece.
   // The result is affected by
   // max_sentencepiece_length, split_by_whiespace, split_by_unicode_script.
@@ -122,6 +130,7 @@ class TrainerInterface {
   // e.g.,
   //  [ ["hello world ", 1], ["hi world]" ] =>
   //  [ ["hello", 1], ["hi", 1], ["world", 2] ]
+  util::Status LoadSentences();
   void SplitSentencesByWhitespace();
 
   // Save model files into spec.model_prefix().
@@ -129,13 +138,10 @@ class TrainerInterface {
 
   // Set of characters which must be included in the final vocab.
   // The value of this map stores the frequency.
-  absl::flat_hash_map<char32, int64> required_chars_;
+  absl::flat_hash_map<char32_t, int64_t> required_chars_;
 
   // Final output pieces
   std::vector<std::pair<std::string, float>> final_pieces_;
-
-  // All sentences.
-  Sentences sentences_;
 
   // Trainer spec.
   TrainerSpec trainer_spec_;
@@ -160,7 +166,8 @@ class TrainerInterface {
   // Emits model to this proto instead of file.
   ModelProto *output_model_proto_ = nullptr;
 
- private:
+private:
+  LevelDBManager& db_manager_ = g_leveldb_manager;
   // Serialize final_pieces_ to |model_proto|.
   util::Status Serialize(ModelProto *model_proto) const;
 

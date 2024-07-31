@@ -21,9 +21,6 @@
 #include <string_view>
 #include <utility>
 #include <vector>
-#include <leveldb/db.h>
-#include <leveldb/write_batch.h>
-#include <sstream>
 
 #ifndef SWIG
 namespace absl {
@@ -164,7 +161,6 @@ class SentencePieceText_SentencePiece;
 class ImmutableSentencePieceText_ImmutableSentencePiece {
  public:
   ImmutableSentencePieceText_ImmutableSentencePiece();
-  explicit ImmutableSentencePieceText_ImmutableSentencePiece(const SentencePieceText_SentencePiece &sp);
   ~ImmutableSentencePieceText_ImmutableSentencePiece() = default;
 
   const std::string &piece() const;
@@ -175,30 +171,21 @@ class ImmutableSentencePieceText_ImmutableSentencePiece {
 
   friend class ImmutableSentencePieceText;
 
-  // Serialization and Deserialization methods
-  std::string Serialize() const;
-  static ImmutableSentencePieceText_ImmutableSentencePiece Deserialize(const std::string& data);
-
  private:
+  explicit ImmutableSentencePieceText_ImmutableSentencePiece(
+      const SentencePieceText_SentencePiece &sp);
   const SentencePieceText_SentencePiece *sp_ = nullptr;
-
-  // Adding private members to hold the data for serialization
-  std::string piece_;
-  std::string surface_;
-  uint32_t id_;
-  uint32_t begin_;
-  uint32_t end_;
 };
 
 class ImmutableSentencePieceText {
  public:
   ImmutableSentencePieceText();
-  explicit ImmutableSentencePieceText(const SentencePieceText &spt);
   virtual ~ImmutableSentencePieceText();
+
+  std::vector<ImmutableSentencePieceText_ImmutableSentencePiece> pieces() const;
 
   size_t pieces_size() const;
   ImmutableSentencePieceText_ImmutableSentencePiece pieces(int index) const;
-  void AddPiece(int index, const ImmutableSentencePieceText_ImmutableSentencePiece& piece);
 
   const std::string &text() const;
   float score() const;
@@ -212,23 +199,13 @@ class ImmutableSentencePieceText {
 
   // Converts the utf8 byte spans into Unicode char span.
   void ConvertToUnicodeSpans();
-  void ConvertToUnicodeSpansInternal();  
-
-  std::string Serialize() const;
-  static ImmutableSentencePieceText Deserialize(const std::string& data);
 
   friend class ImmutableNBestSentencePieceText;
 
  private:
+  explicit ImmutableSentencePieceText(const SentencePieceText &spt);
   const SentencePieceText *spt_ = nullptr;
   std::shared_ptr<SentencePieceText> rep_;
-
-  // LevelDB database instance
-  leveldb::DB* db_;
-  std::string db_name_ = "sentence_pieces";
-
-  void OpenDB();
-  void CloseDB();
 };
 
 // Wrapper class of SentencePieceText
@@ -240,21 +217,21 @@ class ImmutableNBestSentencePieceText {
   ImmutableNBestSentencePieceText();
   virtual ~ImmutableNBestSentencePieceText();
 
+  std::vector<ImmutableSentencePieceText> nbests() const;
+
   size_t nbests_size() const;
   ImmutableSentencePieceText nbests(int index) const;
 
   util::bytes SerializeAsString() const;
 
-  NBestSentencePieceText* mutable_proto();
+  // Returns the actual mutable proto.
+  // Do not use this outside of SentencePieceProcessor, as
+  // it returns the raw pointer managed by the shared_ptr.
+  NBestSentencePieceText *mutable_proto();
 
   void ConvertToUnicodeSpans();
 
  private:
-  void OpenDB();
-  void CloseDB();
-
-  std::string db_name_ = "nbest_sentence_piece_text_db";
-  leveldb::DB* db_;
   std::shared_ptr<NBestSentencePieceText> rep_;
 };
 

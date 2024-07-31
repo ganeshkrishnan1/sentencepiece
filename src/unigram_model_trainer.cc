@@ -37,6 +37,8 @@
 #include "unicode_script.h"
 #include "util.h"
 
+#include "leveldb_utils.h"
+
 namespace sentencepiece {
 namespace unigram {
 namespace {
@@ -145,43 +147,30 @@ TrainerModel::SentencePieces Trainer::MakeSeedSentencePieces() {
 // Returns seed sentencepieces for EM training.
 template <typename node_int_type>
 TrainerModel::SentencePieces Trainer::MakeSeedSentencePiecesInternal() {
-  CHECK(!sentences_.empty());
   CHECK(!required_chars_.empty());
 
   // Pretokenizer applied only in training time.
   // Pretokenizer is used as a constraint of piece extractions.
   const auto *pretokenizer = SentencePieceTrainer::GetPretokenizerForTraining();
 
-  auto pretokenize_or_rewrite = [&](std::pair<std::string, int64_t> *w) {
+  auto pretokenize_or_rewrite = [&](std::pair<std::string, int64> *w) {
     if (pretokenizer) {
-      std::string key = pretokenizer->PreTokenize(w->first);
-      std::string value;
-      leveldb::Status status = pretokenizer->GetDB()->Get(leveldb::ReadOptions(), key, &value);
-      if (!status.ok()) {
-        // Handle error
-        return std::vector<char32_t>{};
-      }
-      std::vector<char32_t> chars;
-
-      // Inline logic for splitting the UTF-8 string
-      std::stringstream ss(value);
-      std::string token;
-      while (std::getline(ss, token, ' ')) {
-        for (const auto &c : string_util::UTF8ToUnicodeText(token)) {
+      std::vector<char32> chars;
+      for (const auto &w : pretokenizer->PreTokenize(w->first)) {
+        for (const auto &c : string_util::UTF8ToUnicodeText(w)) {
           chars.push_back(c);
         }
         chars.push_back(kSentenceBoundary);
       }
-
       return chars;
     } else if (!trainer_spec_.pretokenization_delimiter().empty()) {
       // When delimiter is specified, tokenize the input with the delimiter.
       // For EM training, we assume that the delimiter doesn't exist and
       // rewrite the original sentence.
-      std::vector<char32_t> chars;
+      std::vector<char32> chars;
       absl::string_view delimiter = trainer_spec_.pretokenization_delimiter();
-      for (const auto &token : absl::StrSplit(w->first, delimiter)) {
-        for (const auto &c : string_util::UTF8ToUnicodeText(token)) {
+      for (const auto &w : absl::StrSplit(w->first, delimiter)) {
+        for (const auto &c : string_util::UTF8ToUnicodeText(w)) {
           chars.push_back(c);
         }
         chars.push_back(kSentenceBoundary);
@@ -190,11 +179,7 @@ TrainerModel::SentencePieces Trainer::MakeSeedSentencePiecesInternal() {
       w->first = absl::StrReplaceAll(w->first, {{delimiter, ""}});
       return chars;
     }
-    std::vector<char32_t> result;
-    for (char32_t c : string_util::UTF8ToUnicodeText(w->first)) {
-      result.push_back(c);
-    }
-    return result;
+    return string_util::UTF8ToUnicodeText(w->first);
   };
 
   // Merges all sentences into one array with 0x0000 delimiter.
@@ -203,7 +188,15 @@ TrainerModel::SentencePieces Trainer::MakeSeedSentencePiecesInternal() {
 
   const bool is_tsv = trainer_spec_.input_format() == "tsv";
 
-  for (auto &w : sentences_) {
+  std::unique_ptr<leveldb::Iterator> it(g_leveldb_manager.GetDB()->NewIterator(leveldb::ReadOptions()));
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    Sentence sentence;
+    util::Status status = GetSentence(it->key().ToString(), &sentence);
+    if (!status.ok()) {
+      LOG(ERROR) << "Failed to get sentence: " << status.ToString();
+      continue;  // Skip this sentence and continue with the next one
+    }
+    auto w = std::make_pair(sentence.first, sentence.second);
     const auto ut = pretokenize_or_rewrite(&w);
     for (const auto &c : ut) {
       array.push_back(c);
@@ -341,8 +334,16 @@ std::vector<float> Trainer::RunEStep(const TrainerModel &model, float *obj,
   pool->StartWorkers();
 
   int64 all_sentence_freq = 0;
-  for (const auto &w : sentences_) {
-    all_sentence_freq += w.second;
+  std::unique_ptr<leveldb::Iterator> it(g_leveldb_manager.GetDB()->NewIterator(leveldb::ReadOptions()));
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    std::string value = it->value().ToString();
+    std::vector<std::string> parts = absl::StrSplit(value, '\t');
+    if (parts.size() == 2) {
+      int64 freq;
+      if (absl::SimpleAtoi(parts[1], &freq)) {
+        all_sentence_freq += freq;
+      }
+    }
   }
 
   // Executes E step in parallel
@@ -350,10 +351,38 @@ std::vector<float> Trainer::RunEStep(const TrainerModel &model, float *obj,
     pool->Schedule([&, n]() {
       Lattice lattice;
       expected[n].resize(model.GetPieceSize(), 0.0);
-      for (size_t i = n; i < sentences_.size();
-           i += trainer_spec_.num_threads()) {
-        const std::string &w = sentences_[i].first;
-        const int64 freq = sentences_[i].second;
+      int64_t total_sentences = 0;
+      {
+        std::unique_ptr<leveldb::Iterator> it(g_leveldb_manager.GetDB()->NewIterator(leveldb::ReadOptions()));
+        for (it->SeekToFirst(); it->Valid(); it->Next()) {
+          total_sentences++;
+        }
+      }
+      for (size_t i = n; i < total_sentences; i += trainer_spec_.num_threads()) {
+        std::string key, value;
+        {
+          std::unique_ptr<leveldb::Iterator> it(g_leveldb_manager.GetDB()->NewIterator(leveldb::ReadOptions()));
+          it->Seek(std::to_string(i));
+          if (it->Valid()) {
+            key = it->key().ToString();
+            value = it->value().ToString();
+          } else {
+            LOG(ERROR) << "Invalid sentence index: " << i;
+            continue;
+          }
+        }
+        // Split the value into sentence and frequency
+        std::vector<std::string> parts = absl::StrSplit(value, '\t');
+        if (parts.size() != 2) {
+          LOG(ERROR) << "Invalid sentence format in LevelDB: " << value;
+          continue;
+        }
+        const std::string &w = parts[0];
+        int64 freq;
+        if (!absl::SimpleAtoi(parts[1], &freq)) {
+          LOG(ERROR) << "Invalid frequency in LevelDB: " << parts[1];
+          continue;
+        }
         lattice.SetSentence(w);
         model.PopulateNodes(&lattice);
         const float Z = lattice.PopulateMarginal(freq, &expected[n]);
@@ -467,16 +496,20 @@ TrainerModel::SentencePieces Trainer::PruneSentencePieces(
 
       pool->Schedule([&, n]() {
         Lattice lattice;
-        for (size_t i = n; i < sentences_.size();
-             i += trainer_spec_.num_threads()) {
-          const auto &w = sentences_[i];
-          lattice.SetSentence(w.first);
+        std::unique_ptr<leveldb::Iterator> it(g_leveldb_manager.GetDB()->NewIterator(leveldb::ReadOptions()));
+        for (it->SeekToFirst(); it->Valid(); it->Next()) {
+          const std::string &key = it->key().ToString();
+          const std::string &value = it->value().ToString();
+          int64_t count;
+          CHECK(absl::SimpleAtoi(value, &count)) << "Invalid count: " << value;
+
+          lattice.SetSentence(key);
           model.PopulateNodes(&lattice);
-          vsums[n] += w.second;
+          vsums[n] += count;
           for (const auto *node : lattice.Viterbi().first) {
             if (node->id >= 0) {
-              freqs[n][node->id] += w.second;
-              inverteds[n][node->id].push_back(i);
+              freqs[n][node->id] += count;
+              inverteds[n][node->id].push_back(std::stoi(key));
             }
           }
         }
@@ -514,7 +547,15 @@ TrainerModel::SentencePieces Trainer::PruneSentencePieces(
     } else {
       float F = 0.0;  // the frequency of sentencepieces[i].
       for (const int n : inverted[i]) {
-        F += sentences_[n].second;
+        std::string value;
+        leveldb::Status s = g_leveldb_manager.GetDB()->Get(leveldb::ReadOptions(), std::to_string(n), &value);
+        if (s.ok()) {
+          int64_t count;
+          CHECK(absl::SimpleAtoi(value, &count)) << "Invalid count: " << value;
+          F += count;
+        } else {
+          LOG(WARNING) << "Failed to get sentence " << n << ": " << s.ToString();
+        }
       }
       F /= vsum;  // normalizes by all sentence frequency.
 
@@ -615,7 +656,12 @@ util::Status Trainer::Train() {
     SplitSentencesByWhitespace();
   }
 
-  LOG(INFO) << "Using " << sentences_.size() << " sentences for EM training";
+  int64_t sentence_count = 0;
+  std::unique_ptr<leveldb::Iterator> it(g_leveldb_manager.GetDB()->NewIterator(leveldb::ReadOptions()));
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    sentence_count++;
+  }
+  LOG(INFO) << "Using " << sentence_count << " sentences for EM training";
 
   desired_vocab_size_ = static_cast<size_t>(trainer_spec_.vocab_size() * 1.1);
 

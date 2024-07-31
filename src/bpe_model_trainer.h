@@ -25,6 +25,8 @@
 #include "third_party/absl/container/flat_hash_map.h"
 #include "trainer_interface.h"
 
+#include "leveldb_utils.h"
+
 namespace sentencepiece {
 namespace bpe {
 
@@ -33,9 +35,9 @@ class Trainer : public TrainerInterface {
  public:
   Trainer(const TrainerSpec &trainer_spec,
           const NormalizerSpec &normalizer_spec,
-          const NormalizerSpec &denormalizer_spec)
-      : TrainerInterface::TrainerInterface(trainer_spec, normalizer_spec,
-                                           denormalizer_spec) {}
+          const NormalizerSpec &denormalizer_spec);
+  
+  ~Trainer();
 
   util::Status Train() override;
 
@@ -124,6 +126,9 @@ class Trainer : public TrainerInterface {
 
   // Sentences. symbols_[sid][index] stores a symbol in sentence_[sid][index].
   std::vector<std::vector<Symbol *>> symbols_;
+
+  util::Status OpenSentenceDB();
+  util::Status CloseSentenceDB();
 };
 }  // namespace bpe
 }  // namespace sentencepiece

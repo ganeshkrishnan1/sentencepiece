@@ -79,3 +79,4 @@ python/sentencepiece
 leveldb
 
 python/setup.py
+**/CMakeLists.txt
