@@ -21,4 +21,4 @@ sudo make install
 
 
 
-spm_train --input=sample_text.txt --model_prefix=m --vocab_size=30
+spm_train --input=sample_text.txt --model_prefix=m --vocab_size=160
